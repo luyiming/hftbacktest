@@ -5,10 +5,9 @@ use std::{
 };
 
 use anyhow::Error;
+#[cfg(feature = "live")]
 use bincode::{
-    BorrowDecode,
-    Decode,
-    Encode,
+    BorrowDecode, Decode, Encode,
     de::{BorrowDecoder, Decoder},
     enc::Encoder,
     error::{DecodeError, EncodeError},
@@ -19,7 +18,8 @@ use thiserror::Error;
 
 use crate::{backtest::data::POD, depth::MarketDepth};
 
-#[derive(Clone, Debug, Decode, Encode)]
+#[cfg_attr(feature = "live", derive(Decode, Encode))]
+#[derive(Clone, Debug)]
 pub enum Value {
     String(String),
     Int(i64),
@@ -88,7 +88,8 @@ impl From<anyhow::Error> for Value {
 }
 
 /// Error conveyed through [`LiveEvent`].
-#[derive(Clone, Debug, Decode, Encode)]
+#[cfg_attr(feature = "live", derive(Decode, Encode))]
+#[derive(Clone, Debug)]
 pub struct LiveError {
     pub kind: ErrorKind,
     pub value: Value,
@@ -115,7 +116,8 @@ impl LiveError {
 }
 
 /// Error type assigned to [`LiveError`].
-#[derive(Clone, Copy, Eq, PartialEq, Debug, Decode, Encode)]
+#[cfg_attr(feature = "live", derive(Decode, Encode))]
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
 pub enum ErrorKind {
     ConnectionInterrupted,
     CriticalConnectionError,
@@ -124,7 +126,8 @@ pub enum ErrorKind {
 }
 
 /// Events occurring in a live bot sent by a [`Connector`](`crate::connector::Connector`).
-#[derive(Clone, Debug, Decode, Encode)]
+#[cfg_attr(feature = "live", derive(Decode, Encode))]
+#[derive(Clone, Debug)]
 pub enum LiveEvent {
     BatchStart,
     BatchEnd,
@@ -310,7 +313,8 @@ pub enum WaitOrderResponse {
 
 /// Feed event data.
 #[repr(C, align(64))]
-#[derive(Clone, PartialEq, Debug, NpyDTyped, Decode, Encode)]
+#[cfg_attr(feature = "live", derive(Decode, Encode))]
+#[derive(Clone, PartialEq, Debug, NpyDTyped)]
 pub struct Event {
     /// Event flag
     pub ev: u64,
@@ -351,7 +355,8 @@ impl Event {
 
 /// Represents a side, which can refer to either the side of an order or the initiator's side in a
 /// trade event, with the meaning varying depending on the context.
-#[derive(Clone, Copy, Eq, PartialEq, Debug, Decode, Encode)]
+#[cfg_attr(feature = "live", derive(Decode, Encode))]
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
 #[repr(i8)]
 pub enum Side {
     /// In the market depth event, this indicates the bid side; in the market trade event, it
@@ -390,7 +395,8 @@ impl AsRef<str> for Side {
 }
 
 /// Order status
-#[derive(Clone, Copy, Eq, PartialEq, Debug, Decode, Encode)]
+#[cfg_attr(feature = "live", derive(Decode, Encode))]
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
 #[repr(u8)]
 pub enum Status {
     None = 0,
@@ -407,7 +413,8 @@ pub enum Status {
 }
 
 /// Time In Force
-#[derive(Clone, Copy, Eq, PartialEq, Debug, Decode, Encode)]
+#[cfg_attr(feature = "live", derive(Decode, Encode))]
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
 #[repr(u8)]
 pub enum TimeInForce {
     /// Good 'Til Canceled
@@ -436,7 +443,8 @@ impl AsRef<str> for TimeInForce {
 }
 
 /// Order type
-#[derive(Clone, Copy, Eq, PartialEq, Debug, Decode, Encode)]
+#[cfg_attr(feature = "live", derive(Decode, Encode))]
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
 #[repr(u8)]
 pub enum OrdType {
     Limit = 0,
@@ -643,6 +651,7 @@ impl Debug for Order {
     }
 }
 
+#[cfg(feature = "live")]
 impl<Context> Decode<Context> for Order {
     fn decode<D: Decoder>(decoder: &mut D) -> Result<Self, DecodeError> {
         Ok(Self {
@@ -667,6 +676,7 @@ impl<Context> Decode<Context> for Order {
     }
 }
 
+#[cfg(feature = "live")]
 impl<'de, Context> BorrowDecode<'de, Context> for Order {
     fn borrow_decode<D: BorrowDecoder<'de>>(decoder: &mut D) -> Result<Self, DecodeError> {
         Ok(Self {
@@ -691,6 +701,7 @@ impl<'de, Context> BorrowDecode<'de, Context> for Order {
     }
 }
 
+#[cfg(feature = "live")]
 impl Encode for Order {
     fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
         self.qty.encode(encoder)?;
@@ -714,7 +725,8 @@ impl Encode for Order {
 }
 
 /// An asynchronous request to [`Connector`](`crate::connector::Connector`).
-#[derive(Clone, Debug, Encode, Decode)]
+#[cfg_attr(feature = "live", derive(Encode, Decode))]
+#[derive(Clone, Debug)]
 pub enum LiveRequest {
     /// An order request, a tuple consisting of an asset number and an [`Order`].
     Order { symbol: String, order: Order },
@@ -764,7 +776,7 @@ pub enum BuildError {
 }
 
 /// Used to submit an order in a live bot.
-#[derive(Decode, Encode)]
+#[cfg_attr(feature = "live", derive(Decode, Encode))]
 pub struct OrderRequest {
     pub order_id: u64,
     pub price: f64,
