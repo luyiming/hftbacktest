@@ -206,7 +206,7 @@ impl L2MarketDepth for HashMapMarketDepth {
                         }
                     }
                     self.best_bid_tick =
-                        depth_below(&self.bid_depth, clear_upto - 1, self.low_bid_tick);
+                        depth_below(&self.bid_depth, clear_upto, self.low_bid_tick);
                 } else {
                     self.bid_depth.clear();
                     self.best_bid_tick = INVALID_MIN;
@@ -226,7 +226,7 @@ impl L2MarketDepth for HashMapMarketDepth {
                         }
                     }
                     self.best_ask_tick =
-                        depth_above(&self.ask_depth, clear_upto + 1, self.high_ask_tick);
+                        depth_above(&self.ask_depth, clear_upto, self.high_ask_tick);
                 } else {
                     self.ask_depth.clear();
                     self.best_ask_tick = INVALID_MAX;
