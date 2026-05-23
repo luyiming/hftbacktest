@@ -392,6 +392,9 @@ where
             exec_price_tick: 0,
             exch_timestamp: 0,
             exec_qty: 0.0,
+            cum_exec_qty: 0.0,
+            cum_exec_value: 0.0,
+            taker_price_level_count: 0,
             // Invalid information
             q: Box::new(()),
             maker: false,

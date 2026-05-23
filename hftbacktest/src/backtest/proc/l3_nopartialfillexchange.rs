@@ -125,6 +125,11 @@ where
         }
 
         order.exec_qty = order.leaves_qty;
+        order.cum_exec_qty += order.exec_qty;
+        order.cum_exec_value += order.exec_qty * order.latest_exec_price();
+        if !maker {
+            order.taker_price_level_count += 1;
+        }
         order.leaves_qty = 0.0;
         order.status = Status::Filled;
         order.exch_timestamp = timestamp;

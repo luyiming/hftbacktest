@@ -308,6 +308,38 @@ impl MarketDepth for HashMapMarketDepth {
     fn ask_qty_at_tick(&self, price_tick: i64) -> f64 {
         *self.ask_depth.get(&price_tick).unwrap_or(&0.0)
     }
+
+    #[inline(always)]
+    fn for_each_ask_depth_from<F>(&self, start_tick: i64, mut visitor: F)
+    where
+        F: FnMut(i64, f64) -> bool,
+    {
+        if start_tick == INVALID_MAX || self.high_ask_tick == INVALID_MIN {
+            return;
+        }
+        for price_tick in start_tick.max(self.best_ask_tick)..=self.high_ask_tick {
+            let qty = self.ask_qty_at_tick(price_tick);
+            if qty > 0.0 && !visitor(price_tick, qty) {
+                break;
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn for_each_bid_depth_from<F>(&self, start_tick: i64, mut visitor: F)
+    where
+        F: FnMut(i64, f64) -> bool,
+    {
+        if start_tick == INVALID_MIN || self.low_bid_tick == INVALID_MAX {
+            return;
+        }
+        for price_tick in (self.low_bid_tick..=start_tick.min(self.best_bid_tick)).rev() {
+            let qty = self.bid_qty_at_tick(price_tick);
+            if qty > 0.0 && !visitor(price_tick, qty) {
+                break;
+            }
+        }
+    }
 }
 
 impl ApplySnapshot for HashMapMarketDepth {

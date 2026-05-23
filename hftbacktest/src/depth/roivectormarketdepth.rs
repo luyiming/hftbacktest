@@ -459,6 +459,36 @@ impl MarketDepth for ROIVectorMarketDepth {
             }
         }
     }
+
+    #[inline(always)]
+    fn for_each_ask_depth_from<F>(&self, start_tick: i64, mut visitor: F)
+    where
+        F: FnMut(i64, f64) -> bool,
+    {
+        let start_tick = start_tick.max(self.best_ask_tick).max(self.roi_lb);
+        let end_tick = self.high_ask_tick.min(self.roi_ub);
+        for price_tick in start_tick..=end_tick {
+            let qty = self.ask_qty_at_tick(price_tick);
+            if qty > 0.0 && !visitor(price_tick, qty) {
+                break;
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn for_each_bid_depth_from<F>(&self, start_tick: i64, mut visitor: F)
+    where
+        F: FnMut(i64, f64) -> bool,
+    {
+        let start_tick = start_tick.min(self.best_bid_tick).min(self.roi_ub);
+        let end_tick = self.low_bid_tick.max(self.roi_lb);
+        for price_tick in (end_tick..=start_tick).rev() {
+            let qty = self.bid_qty_at_tick(price_tick);
+            if qty > 0.0 && !visitor(price_tick, qty) {
+                break;
+            }
+        }
+    }
 }
 
 impl ApplySnapshot for ROIVectorMarketDepth {

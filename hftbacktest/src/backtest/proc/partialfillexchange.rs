@@ -228,6 +228,11 @@ where
         }
 
         order.exec_qty = exec_qty;
+        order.cum_exec_qty += exec_qty;
+        order.cum_exec_value += exec_qty * order.latest_exec_price();
+        if !maker {
+            order.taker_price_level_count += 1;
+        }
         order.leaves_qty -= exec_qty;
         if (order.leaves_qty / self.depth.lot_size()).round() > 0f64 {
             order.status = Status::PartiallyFilled;
@@ -500,13 +505,17 @@ where
                     }
                 }
                 OrdType::Market => {
-                    // todo: set the proper upper bound.
-                    for t in self.depth.best_ask_tick()..(self.depth.best_ask_tick() + 100) {
-                        let qty = self.depth.ask_qty_at_tick(t);
-                        if qty > 0.0 {
-                            let exec_qty = qty.min(order.leaves_qty);
-                            self.fill::<false>(order, timestamp, false, t, exec_qty)?;
-                        }
+                    let mut remaining = order.leaves_qty;
+                    let mut fills = Vec::new();
+                    self.depth
+                        .for_each_ask_depth_from(self.depth.best_ask_tick(), |t, qty| {
+                            let exec_qty = qty.min(remaining);
+                            fills.push((t, exec_qty));
+                            remaining -= exec_qty;
+                            remaining > 0.0
+                        });
+                    for (t, exec_qty) in fills {
+                        self.fill::<false>(order, timestamp, false, t, exec_qty)?;
                         if order.status == Status::Filled {
                             return Ok(());
                         }
@@ -630,14 +639,17 @@ where
                     }
                 }
                 OrdType::Market => {
-                    // todo: set the proper lower bound.
-                    for t in ((self.depth.best_bid_tick() - 100)..=self.depth.best_bid_tick()).rev()
-                    {
-                        let qty = self.depth.bid_qty_at_tick(t);
-                        if qty > 0.0 {
-                            let exec_qty = qty.min(order.leaves_qty);
-                            self.fill::<false>(order, timestamp, false, t, exec_qty)?;
-                        }
+                    let mut remaining = order.leaves_qty;
+                    let mut fills = Vec::new();
+                    self.depth
+                        .for_each_bid_depth_from(self.depth.best_bid_tick(), |t, qty| {
+                            let exec_qty = qty.min(remaining);
+                            fills.push((t, exec_qty));
+                            remaining -= exec_qty;
+                            remaining > 0.0
+                        });
+                    for (t, exec_qty) in fills {
+                        self.fill::<false>(order, timestamp, false, t, exec_qty)?;
                         if order.status == Status::Filled {
                             return Ok(());
                         }
@@ -863,5 +875,183 @@ where
         self.order_e2l
             .earliest_send_order_timestamp()
             .unwrap_or(i64::MAX)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+
+    use crate::{
+        backtest::{
+            Backtest, DataSource, ExchangeKind, L2AssetBuilder, assettype::LinearAsset, data::Data,
+            models::{CommonFees, ConstantLatency, RiskAdverseQueueModel, TradingValueFeeModel},
+        },
+        depth::BTreeMarketDepth,
+        prelude::{Bot, OrdType, Side, TimeInForce},
+        types::{BUY_EVENT, DEPTH_EVENT, EXCH_EVENT, Event, LOCAL_EVENT, SELL_EVENT, Status},
+    };
+
+    fn depth_event(side: Side, px: f64, qty: f64) -> Event {
+        let side_flag = match side {
+            Side::Buy => BUY_EVENT,
+            Side::Sell => SELL_EVENT,
+            _ => unreachable!(),
+        };
+        Event {
+            ev: DEPTH_EVENT | side_flag | EXCH_EVENT | LOCAL_EVENT,
+            exch_ts: 0,
+            local_ts: 0,
+            px,
+            qty,
+            order_id: 0,
+            ival: 0,
+            fval: 0.0,
+        }
+    }
+
+    fn empty_event() -> Event {
+        Event {
+            ev: EXCH_EVENT | LOCAL_EVENT,
+            exch_ts: 0,
+            local_ts: 0,
+            px: 0.0,
+            qty: 0.0,
+            order_id: 0,
+            ival: 0,
+            fval: 0.0,
+        }
+    }
+
+    fn backtest(
+        events: &[Event],
+        exchange: ExchangeKind,
+    ) -> Result<Backtest<BTreeMarketDepth>, Box<dyn Error>> {
+        Ok(Backtest::builder()
+            .add_asset(
+                L2AssetBuilder::default()
+                    .data(vec![DataSource::Data(Data::from_data(events))])
+                    .latency_model(ConstantLatency::new(0, 0))
+                    .asset_type(LinearAsset::new(1.0))
+                    .fee_model(TradingValueFeeModel::new(CommonFees::new(0.0, 0.0)))
+                    .queue_model(RiskAdverseQueueModel::new())
+                    .exchange(exchange)
+                    .depth(|| BTreeMarketDepth::new(1.0, 1.0))
+                    .build()?,
+            )
+            .build()?)
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn market_buy_sweeps_sparse_asks() -> Result<(), Box<dyn Error>> {
+        let mut hbt = backtest(
+            &[
+                depth_event(Side::Sell, 100.0, 1.0),
+                depth_event(Side::Sell, 250.0, 2.0),
+            ],
+            ExchangeKind::PartialFillExchange,
+        )?;
+        let _ = hbt.elapse(0)?;
+
+        hbt.submit_buy_order(0, 1, 0.0, 3.0, TimeInForce::IOC, OrdType::Market, true)?;
+
+        let order = hbt.orders(0).get(&1).expect("order should exist");
+        assert_eq!(order.status, Status::Filled);
+        assert_close(order.cum_exec_qty, 3.0);
+        assert_close(order.exec_price(), 200.0);
+        assert_eq!(order.taker_price_level_count, 2);
+        assert_close(hbt.position(0), 3.0);
+        assert_close(hbt.state_values(0).trading_value, 600.0);
+        Ok(())
+    }
+
+    #[test]
+    fn market_sell_sweeps_sparse_bids() -> Result<(), Box<dyn Error>> {
+        let mut hbt = backtest(
+            &[
+                depth_event(Side::Buy, 300.0, 1.0),
+                depth_event(Side::Buy, 150.0, 2.0),
+            ],
+            ExchangeKind::PartialFillExchange,
+        )?;
+        let _ = hbt.elapse(0)?;
+
+        hbt.submit_sell_order(0, 1, 0.0, 3.0, TimeInForce::IOC, OrdType::Market, true)?;
+
+        let order = hbt.orders(0).get(&1).expect("order should exist");
+        assert_eq!(order.status, Status::Filled);
+        assert_close(order.cum_exec_qty, 3.0);
+        assert_close(order.exec_price(), 200.0);
+        assert_eq!(order.taker_price_level_count, 2);
+        assert_close(hbt.position(0), -3.0);
+        assert_close(hbt.state_values(0).trading_value, 600.0);
+        Ok(())
+    }
+
+    #[test]
+    fn market_order_partially_fills_and_expires() -> Result<(), Box<dyn Error>> {
+        let mut hbt = backtest(
+            &[
+                depth_event(Side::Sell, 100.0, 1.0),
+                depth_event(Side::Sell, 250.0, 2.0),
+            ],
+            ExchangeKind::PartialFillExchange,
+        )?;
+        let _ = hbt.elapse(0)?;
+
+        hbt.submit_buy_order(0, 1, 0.0, 5.0, TimeInForce::IOC, OrdType::Market, true)?;
+
+        let order = hbt.orders(0).get(&1).expect("order should exist");
+        assert_eq!(order.status, Status::Expired);
+        assert_close(order.cum_exec_qty, 3.0);
+        assert_close(order.leaves_qty, 2.0);
+        assert_close(order.exec_price(), 200.0);
+        assert_eq!(order.taker_price_level_count, 2);
+        assert_close(hbt.position(0), 3.0);
+        assert_close(hbt.state_values(0).trading_value, 600.0);
+        Ok(())
+    }
+
+    #[test]
+    fn zero_liquidity_market_order_expires_without_fill() -> Result<(), Box<dyn Error>> {
+        let mut hbt = backtest(&[empty_event()], ExchangeKind::PartialFillExchange)?;
+        let _ = hbt.elapse(0)?;
+
+        hbt.submit_buy_order(0, 1, 0.0, 5.0, TimeInForce::IOC, OrdType::Market, true)?;
+
+        let order = hbt.orders(0).get(&1).expect("order should exist");
+        assert_eq!(order.status, Status::Expired);
+        assert_close(order.cum_exec_qty, 0.0);
+        assert_eq!(order.taker_price_level_count, 0);
+        assert_close(order.leaves_qty, 5.0);
+        assert_close(hbt.position(0), 0.0);
+        assert_close(hbt.state_values(0).trading_value, 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn no_partial_fill_exchange_still_fills_at_best_price() -> Result<(), Box<dyn Error>> {
+        let mut hbt = backtest(
+            &[depth_event(Side::Sell, 100.0, 1.0)],
+            ExchangeKind::NoPartialFillExchange,
+        )?;
+        let _ = hbt.elapse(0)?;
+
+        hbt.submit_buy_order(0, 1, 0.0, 5.0, TimeInForce::IOC, OrdType::Market, true)?;
+
+        let order = hbt.orders(0).get(&1).expect("order should exist");
+        assert_eq!(order.status, Status::Filled);
+        assert_close(order.cum_exec_qty, 5.0);
+        assert_close(order.exec_price(), 100.0);
+        assert_eq!(order.taker_price_level_count, 1);
+        assert_close(hbt.position(0), 5.0);
+        Ok(())
     }
 }

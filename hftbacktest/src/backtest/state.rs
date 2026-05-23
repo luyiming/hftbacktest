@@ -1,5 +1,8 @@
 use crate::{
-    backtest::{assettype::AssetType, models::FeeModel},
+    backtest::{
+        assettype::AssetType,
+        models::{FeeModel, Fill},
+    },
     types::{Order, StateValues},
 };
 
@@ -36,12 +39,24 @@ where
 
     #[inline]
     pub fn apply_fill(&mut self, order: &Order) {
-        let amount = self.asset_type.amount(order.exec_price(), order.exec_qty);
-        self.state_values.position += order.exec_qty * AsRef::<f64>::as_ref(&order.side);
+        self.apply_fill_qty_price(order, order.exec_qty, order.latest_exec_price());
+    }
+
+    #[inline]
+    pub(crate) fn apply_fill_qty_price(&mut self, order: &Order, exec_qty: f64, exec_price: f64) {
+        let amount = self.asset_type.amount(exec_price, exec_qty);
+        let fill = Fill {
+            qty: exec_qty,
+            price: exec_price,
+            value: amount,
+            maker: order.maker,
+            side: order.side,
+        };
+        self.state_values.position += exec_qty * AsRef::<f64>::as_ref(&order.side);
         self.state_values.balance -= amount * AsRef::<f64>::as_ref(&order.side);
-        self.state_values.fee += self.fee_model.amount(order, amount);
+        self.state_values.fee += self.fee_model.amount(&fill);
         self.state_values.num_trades += 1;
-        self.state_values.trading_volume += order.exec_qty;
+        self.state_values.trading_volume += exec_qty;
         self.state_values.trading_value += amount;
     }
 

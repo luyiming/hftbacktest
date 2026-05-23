@@ -58,6 +58,16 @@ pub trait MarketDepth {
 
     /// Returns the quantity at the ask market depth for a given price in ticks.
     fn ask_qty_at_tick(&self, price_tick: i64) -> f64;
+
+    /// Walks ask-side depth from `start_tick` upward until the visitor returns false.
+    fn for_each_ask_depth_from<F>(&self, start_tick: i64, visitor: F)
+    where
+        F: FnMut(i64, f64) -> bool;
+
+    /// Walks bid-side depth from `start_tick` downward until the visitor returns false.
+    fn for_each_bid_depth_from<F>(&self, start_tick: i64, visitor: F)
+    where
+        F: FnMut(i64, f64) -> bool;
 }
 
 /// Provides Level2-specific market depth functions.

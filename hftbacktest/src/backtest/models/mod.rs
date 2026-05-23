@@ -11,6 +11,7 @@ pub use fee::{
     CommonFees,
     DirectionalFees,
     FeeModel,
+    Fill,
     FlatPerTradeFeeModel,
     TradingQtyFeeModel,
     TradingValueFeeModel,

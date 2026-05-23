@@ -98,9 +98,16 @@ where
                 wait_resp_order_received = true;
             }
 
-            // Processes receiving order response.
-            if order.status == Status::Filled {
-                self.state.apply_fill(&order);
+            let (prev_cum_exec_qty, prev_cum_exec_value) = self
+                .orders
+                .get(&order.order_id)
+                .map(|order| (order.cum_exec_qty, order.cum_exec_value))
+                .unwrap_or((0.0, 0.0));
+            let exec_qty = order.cum_exec_qty - prev_cum_exec_qty;
+            if exec_qty > 0.0 {
+                let exec_value = order.cum_exec_value - prev_cum_exec_value;
+                self.state
+                    .apply_fill_qty_price(&order, exec_qty, exec_value / exec_qty);
             }
             // Applies the received order response to the local orders.
             match self.orders.entry(order.order_id) {

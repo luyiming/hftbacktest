@@ -507,6 +507,12 @@ pub struct Order {
     /// Executed price in ticks (`executed_price / tick_size`), only available when this order is
     /// executed.
     pub exec_price_tick: i64,
+    /// Cumulative executed quantity.
+    pub cum_exec_qty: f64,
+    /// Cumulative executed value.
+    pub cum_exec_value: f64,
+    /// Cumulative number of price levels consumed by taker executions.
+    pub taker_price_level_count: u32,
     /// Order price in ticks (`price / tick_size`).
     pub price_tick: i64,
     /// The tick size of the asset associated with this order.
@@ -556,6 +562,9 @@ impl Order {
             req: Status::None,
             exec_price_tick: 0,
             exec_qty: 0.0,
+            cum_exec_qty: 0.0,
+            cum_exec_value: 0.0,
+            taker_price_level_count: 0,
             order_id,
             q: Box::new(()),
             maker: false,
@@ -570,6 +579,15 @@ impl Order {
 
     /// Returns the executed price, only available when this order is executed.
     pub fn exec_price(&self) -> f64 {
+        if self.cum_exec_qty > 0.0 {
+            self.cum_exec_value / self.cum_exec_qty
+        } else {
+            self.latest_exec_price()
+        }
+    }
+
+    /// Returns the latest fill price.
+    pub(crate) fn latest_exec_price(&self) -> f64 {
         self.exec_price_tick as f64 * self.tick_size
     }
 
@@ -622,6 +640,9 @@ impl Order {
         self.req = order.req;
         self.exec_price_tick = order.exec_price_tick;
         self.exec_qty = order.exec_qty;
+        self.cum_exec_qty = order.cum_exec_qty;
+        self.cum_exec_value = order.cum_exec_value;
+        self.taker_price_level_count = order.taker_price_level_count;
         self.order_id = order.order_id;
         self.q = order.q.clone();
         self.maker = order.maker;
@@ -644,6 +665,9 @@ impl Debug for Order {
             .field("req", &self.req)
             .field("exec_price_tick", &self.exec_price_tick)
             .field("exec_qty", &self.exec_qty)
+            .field("cum_exec_qty", &self.cum_exec_qty)
+            .field("cum_exec_value", &self.cum_exec_value)
+            .field("taker_price_level_count", &self.taker_price_level_count)
             .field("order_id", &self.order_id)
             .field("maker", &self.maker)
             .field("order_type", &self.order_type)
@@ -659,6 +683,9 @@ impl<Context> Decode<Context> for Order {
             leaves_qty: Decode::decode(decoder)?,
             exec_qty: Decode::decode(decoder)?,
             exec_price_tick: Decode::decode(decoder)?,
+            cum_exec_qty: Decode::decode(decoder)?,
+            cum_exec_value: Decode::decode(decoder)?,
+            taker_price_level_count: Decode::decode(decoder)?,
             price_tick: Decode::decode(decoder)?,
             tick_size: Decode::decode(decoder)?,
             exch_timestamp: Decode::decode(decoder)?,
@@ -684,6 +711,9 @@ impl<'de, Context> BorrowDecode<'de, Context> for Order {
             leaves_qty: Decode::decode(decoder)?,
             exec_qty: Decode::decode(decoder)?,
             exec_price_tick: Decode::decode(decoder)?,
+            cum_exec_qty: Decode::decode(decoder)?,
+            cum_exec_value: Decode::decode(decoder)?,
+            taker_price_level_count: Decode::decode(decoder)?,
             price_tick: Decode::decode(decoder)?,
             tick_size: Decode::decode(decoder)?,
             exch_timestamp: Decode::decode(decoder)?,
@@ -708,6 +738,9 @@ impl Encode for Order {
         self.leaves_qty.encode(encoder)?;
         self.exec_qty.encode(encoder)?;
         self.exec_price_tick.encode(encoder)?;
+        self.cum_exec_qty.encode(encoder)?;
+        self.cum_exec_value.encode(encoder)?;
+        self.taker_price_level_count.encode(encoder)?;
         self.price_tick.encode(encoder)?;
         self.tick_size.encode(encoder)?;
         self.exch_timestamp.encode(encoder)?;

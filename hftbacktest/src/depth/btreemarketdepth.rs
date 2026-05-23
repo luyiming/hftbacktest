@@ -274,6 +274,30 @@ impl MarketDepth for BTreeMarketDepth {
     fn ask_qty_at_tick(&self, price_tick: i64) -> f64 {
         *self.ask_depth.get(&price_tick).unwrap_or(&0.0)
     }
+
+    #[inline(always)]
+    fn for_each_ask_depth_from<F>(&self, start_tick: i64, mut visitor: F)
+    where
+        F: FnMut(i64, f64) -> bool,
+    {
+        for (&price_tick, &qty) in self.ask_depth.range(start_tick..) {
+            if qty > 0.0 && !visitor(price_tick, qty) {
+                break;
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn for_each_bid_depth_from<F>(&self, start_tick: i64, mut visitor: F)
+    where
+        F: FnMut(i64, f64) -> bool,
+    {
+        for (&price_tick, &qty) in self.bid_depth.range(..=start_tick).rev() {
+            if qty > 0.0 && !visitor(price_tick, qty) {
+                break;
+            }
+        }
+    }
 }
 
 impl ApplySnapshot for BTreeMarketDepth {
