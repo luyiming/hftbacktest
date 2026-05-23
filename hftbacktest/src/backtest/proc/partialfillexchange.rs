@@ -152,13 +152,12 @@ where
                     // q_ahead is negative since is_filled is true and its value represents the
                     // executable quantity of this order after execution in the queue ahead of this
                     // order.
-                    let exec_qty = if filled_qty > order.leaves_qty {
+                    let exec_qty = filled_qty.min(order.leaves_qty);
+                    self.fill::<true>(order, timestamp, true, order.price_tick, exec_qty)?;
+                    if order.status == Status::Filled {
                         self.filled_orders.push(order.order_id);
-                        order.leaves_qty
-                    } else {
-                        filled_qty
-                    };
-                    return self.fill::<true>(order, timestamp, true, order.price_tick, exec_qty);
+                    }
+                    return Ok(());
                 }
             }
         }
@@ -192,13 +191,12 @@ where
                     // q_ahead is negative since is_filled is true and its value represents the
                     // executable quantity of this order after execution in the queue ahead of this
                     // order.
-                    let exec_qty = if filled_qty > order.leaves_qty {
+                    let exec_qty = filled_qty.min(order.leaves_qty);
+                    self.fill::<true>(order, timestamp, true, order.price_tick, exec_qty)?;
+                    if order.status == Status::Filled {
                         self.filled_orders.push(order.order_id);
-                        order.leaves_qty
-                    } else {
-                        filled_qty
-                    };
-                    return self.fill::<true>(order, timestamp, true, order.price_tick, exec_qty);
+                    }
+                    return Ok(());
                 }
             }
         }
@@ -889,7 +887,10 @@ mod tests {
         },
         depth::BTreeMarketDepth,
         prelude::{Bot, OrdType, Side, TimeInForce},
-        types::{BUY_EVENT, DEPTH_EVENT, EXCH_EVENT, Event, LOCAL_EVENT, SELL_EVENT, Status},
+        types::{
+            BUY_EVENT, DEPTH_EVENT, EXCH_EVENT, EXCH_BUY_TRADE_EVENT, EXCH_SELL_TRADE_EVENT, Event,
+            LOCAL_EVENT, SELL_EVENT, Status,
+        },
     };
 
     fn depth_event(side: Side, px: f64, qty: f64) -> Event {
@@ -917,6 +918,24 @@ mod tests {
             local_ts: 0,
             px: 0.0,
             qty: 0.0,
+            order_id: 0,
+            ival: 0,
+            fval: 0.0,
+        }
+    }
+
+    fn trade_event(side: Side, timestamp: i64, px: f64, qty: f64) -> Event {
+        let ev = match side {
+            Side::Buy => EXCH_BUY_TRADE_EVENT,
+            Side::Sell => EXCH_SELL_TRADE_EVENT,
+            _ => unreachable!(),
+        };
+        Event {
+            ev,
+            exch_ts: timestamp,
+            local_ts: timestamp,
+            px,
+            qty,
             order_id: 0,
             ival: 0,
             fval: 0.0,
@@ -1033,6 +1052,29 @@ mod tests {
         assert_close(order.leaves_qty, 5.0);
         assert_close(hbt.position(0), 0.0);
         assert_close(hbt.state_values(0).trading_value, 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn exact_maker_fill_is_removed_from_exchange_orders() -> Result<(), Box<dyn Error>> {
+        let mut hbt = backtest(
+            &[
+                depth_event(Side::Buy, 100.0, 1.0),
+                depth_event(Side::Sell, 101.0, 1.0),
+                trade_event(Side::Sell, 1, 100.0, 2.0),
+                trade_event(Side::Sell, 2, 100.0, 1.0),
+            ],
+            ExchangeKind::PartialFillExchange,
+        )?;
+        let _ = hbt.elapse(0)?;
+        hbt.submit_buy_order(0, 1, 100.0, 1.0, TimeInForce::GTC, OrdType::Limit, true)?;
+
+        hbt.elapse(2)?;
+
+        let order = hbt.orders(0).get(&1).expect("order should exist");
+        assert_eq!(order.status, Status::Filled);
+        assert_close(order.cum_exec_qty, 1.0);
+        assert_close(hbt.position(0), 1.0);
         Ok(())
     }
 
