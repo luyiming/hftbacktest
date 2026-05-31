@@ -472,7 +472,7 @@ class _Fuse:
 def convert_fuse(
         trades_filename: str,
         depth_filename: str,
-        book_ticker_filename: str,
+        book_ticker_filename: str | None,
         tick_size: float,
         lot_size: float,
         output_filename: Optional[str] = None,
@@ -548,29 +548,42 @@ def convert_fuse(
         .to_numpy(structured=True)
     )
 
-    df = pl.read_csv(book_ticker_filename, schema=book_ticker_schema)
-    if df.columns != list(book_ticker_schema.keys()):
-        raise KeyError
-    ticker_arr = (
-        df.with_columns(
-            (pl.col('timestamp') * 1000)
-            .cast(pl.Int64, strict=True)
-            .alias('exch_ts'),
-            (pl.col('local_timestamp') * 1000)
-            .cast(pl.Int64, strict=True)
-            .alias('local_ts'),
-            pl.col('ask_amount')
-            .cast(pl.Float64, strict=True),
-            pl.col('ask_price')
-            .cast(pl.Float64, strict=True),
-            pl.col('bid_price')
-            .cast(pl.Float64, strict=True),
-            pl.col('bid_amount')
-            .cast(pl.Float64, strict=True),
-            )
-        .select(['exch_ts', 'local_ts', 'ask_amount', 'ask_price', 'bid_price', 'bid_amount'])
-        .to_numpy(structured=True)
-    )
+    if book_ticker_filename is not None:
+        df = pl.read_csv(book_ticker_filename, schema=book_ticker_schema)
+        if df.columns != list(book_ticker_schema.keys()):
+            raise KeyError
+        ticker_arr = (
+            df.with_columns(
+                (pl.col('timestamp') * 1000)
+                .cast(pl.Int64, strict=True)
+                .alias('exch_ts'),
+                (pl.col('local_timestamp') * 1000)
+                .cast(pl.Int64, strict=True)
+                .alias('local_ts'),
+                pl.col('ask_amount')
+                .cast(pl.Float64, strict=True),
+                pl.col('ask_price')
+                .cast(pl.Float64, strict=True),
+                pl.col('bid_price')
+                .cast(pl.Float64, strict=True),
+                pl.col('bid_amount')
+                .cast(pl.Float64, strict=True),
+                )
+            .select(['exch_ts', 'local_ts', 'ask_amount', 'ask_price', 'bid_price', 'bid_amount'])
+            .to_numpy(structured=True)
+        )
+    else:
+        ticker_arr = np.empty(
+            0,
+            dtype=[
+                ("exch_ts", np.int64),
+                ("local_ts", np.int64),
+                ("ask_amount", np.float64),
+                ("ask_price", np.float64),
+                ("bid_price", np.float64),
+                ("bid_amount", np.float64),
+            ],
+        )
 
     df = pl.read_csv(depth_filename, schema=depth_schema)
     if df.columns != list(depth_schema.keys()):
