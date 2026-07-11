@@ -13,6 +13,7 @@ use crate::{
 /// specific range of interest. By doing so, it improves performance, especially when the strategy
 /// requires computing values based on the order book around the mid-price.
 pub struct ROIVectorMarketDepth {
+    pub depth_ready: bool,
     pub tick_size: f64,
     pub lot_size: f64,
     pub timestamp: i64,
@@ -58,6 +59,7 @@ impl ROIVectorMarketDepth {
         let roi_ub = (roi_ub / tick_size).round() as i64;
         let roi_range = (roi_ub + 1 - roi_lb) as usize;
         Self {
+            depth_ready: false,
             tick_size,
             lot_size,
             timestamp: 0,
@@ -367,6 +369,16 @@ impl L2MarketDepth for ROIVectorMarketDepth {
 
 impl MarketDepth for ROIVectorMarketDepth {
     #[inline(always)]
+    fn depth_ready(&self) -> bool {
+        self.depth_ready
+    }
+
+    #[inline(always)]
+    fn mark_depth_ready(&mut self) {
+        self.depth_ready = true;
+    }
+
+    #[inline(always)]
     fn best_bid(&self) -> f64 {
         if self.best_bid_tick == INVALID_MIN {
             f64::NAN
@@ -527,6 +539,7 @@ impl ApplySnapshot for ROIVectorMarketDepth {
                 }
             }
         }
+        self.mark_depth_ready();
     }
 
     fn snapshot(&self) -> Vec<Event> {

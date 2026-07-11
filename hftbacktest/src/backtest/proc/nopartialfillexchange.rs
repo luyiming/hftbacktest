@@ -546,6 +546,9 @@ where
             if best_bid_tick > prev_best_bid_tick {
                 self.on_best_bid_update(prev_best_bid_tick, best_bid_tick, timestamp)?;
             }
+            if event.is(EXCH_BID_DEPTH_SNAPSHOT_EVENT) {
+                self.depth.mark_depth_ready();
+            }
         } else if event.is(EXCH_ASK_DEPTH_EVENT) || event.is(EXCH_ASK_DEPTH_SNAPSHOT_EVENT) {
             let (price_tick, prev_best_ask_tick, best_ask_tick, prev_qty, new_qty, timestamp) =
                 self.depth
@@ -553,6 +556,9 @@ where
             self.on_ask_qty_chg(price_tick, prev_qty, new_qty);
             if best_ask_tick < prev_best_ask_tick {
                 self.on_best_ask_update(prev_best_ask_tick, best_ask_tick, timestamp)?;
+            }
+            if event.is(EXCH_ASK_DEPTH_SNAPSHOT_EVENT) {
+                self.depth.mark_depth_ready();
             }
         } else if event.is(EXCH_BUY_TRADE_EVENT) {
             let price_tick = (event.px / self.depth.tick_size()).round() as i64;

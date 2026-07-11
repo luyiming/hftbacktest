@@ -302,11 +302,20 @@ where
             self.depth.clear_depth(Side::None, 0.0);
         } else if ev.is(LOCAL_BID_DEPTH_EVENT) || ev.is(LOCAL_BID_DEPTH_SNAPSHOT_EVENT) {
             self.depth.update_bid_depth(ev.px, ev.qty, ev.local_ts);
+            if ev.is(LOCAL_BID_DEPTH_SNAPSHOT_EVENT) {
+                self.depth.mark_depth_ready();
+            }
         } else if ev.is(LOCAL_ASK_DEPTH_EVENT) || ev.is(LOCAL_ASK_DEPTH_SNAPSHOT_EVENT) {
             self.depth.update_ask_depth(ev.px, ev.qty, ev.local_ts);
+            if ev.is(LOCAL_ASK_DEPTH_SNAPSHOT_EVENT) {
+                self.depth.mark_depth_ready();
+            }
         }
         // Processes a trade event
         else if ev.is(LOCAL_TRADE_EVENT) && self.trades.capacity() > 0 {
+            if self.trades.len() == self.trades.capacity() {
+                self.trades.remove(0);
+            }
             self.trades.push(ev.clone());
         }
 

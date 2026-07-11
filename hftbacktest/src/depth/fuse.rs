@@ -21,6 +21,7 @@ impl Default for QtyTimestamp {
 }
 
 pub struct FusedHashMapMarketDepth {
+    pub depth_ready: bool,
     pub tick_size: f64,
     pub lot_size: f64,
     pub timestamp: i64,
@@ -58,6 +59,7 @@ impl FusedHashMapMarketDepth {
     /// Constructs an instance of `FusedHashMapMarketDepth`.
     pub fn new(tick_size: f64, lot_size: f64) -> Self {
         Self {
+            depth_ready: false,
             tick_size,
             lot_size,
             timestamp: 0,
@@ -589,6 +591,7 @@ impl ApplySnapshot for FusedHashMapMarketDepth {
                 *self.ask_depth.entry(price_tick).or_default() = QtyTimestamp { qty, ts };
             }
         }
+        self.mark_depth_ready();
     }
 
     fn snapshot(&self) -> Vec<Event> {
@@ -639,6 +642,16 @@ impl ApplySnapshot for FusedHashMapMarketDepth {
 }
 
 impl MarketDepth for FusedHashMapMarketDepth {
+    #[inline(always)]
+    fn depth_ready(&self) -> bool {
+        self.depth_ready
+    }
+
+    #[inline(always)]
+    fn mark_depth_ready(&mut self) {
+        self.depth_ready = true;
+    }
+
     #[inline(always)]
     fn best_bid(&self) -> f64 {
         if self.best_bid_tick == INVALID_MIN {

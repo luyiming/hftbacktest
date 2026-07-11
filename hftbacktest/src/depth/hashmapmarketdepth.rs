@@ -19,6 +19,7 @@ use crate::{
 /// them accordingly. This allows for natural refresh of market depth, even in cases where there are
 /// missing feeds.
 pub struct HashMapMarketDepth {
+    pub depth_ready: bool,
     pub tick_size: f64,
     pub lot_size: f64,
     pub timestamp: i64,
@@ -55,6 +56,7 @@ impl HashMapMarketDepth {
     /// Constructs an instance of `HashMapMarketDepth`.
     pub fn new(tick_size: f64, lot_size: f64) -> Self {
         Self {
+            depth_ready: false,
             tick_size,
             lot_size,
             timestamp: 0,
@@ -252,6 +254,16 @@ impl L2MarketDepth for HashMapMarketDepth {
 
 impl MarketDepth for HashMapMarketDepth {
     #[inline(always)]
+    fn depth_ready(&self) -> bool {
+        self.depth_ready
+    }
+
+    #[inline(always)]
+    fn mark_depth_ready(&mut self) {
+        self.depth_ready = true;
+    }
+
+    #[inline(always)]
     fn best_bid(&self) -> f64 {
         if self.best_bid_tick == INVALID_MIN {
             f64::NAN
@@ -365,6 +377,7 @@ impl ApplySnapshot for HashMapMarketDepth {
                 *self.ask_depth.entry(price_tick).or_insert(0f64) = qty;
             }
         }
+        self.mark_depth_ready();
     }
 
     fn snapshot(&self) -> Vec<Event> {

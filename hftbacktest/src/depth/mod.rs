@@ -25,6 +25,12 @@ pub const INVALID_MAX: i64 = i64::MAX;
 
 /// Provides MarketDepth interface.
 pub trait MarketDepth {
+    /// Returns whether an authoritative depth snapshot has been processed.
+    fn depth_ready(&self) -> bool;
+
+    /// Marks the depth ready after processing an authoritative snapshot.
+    fn mark_depth_ready(&mut self);
+
     /// Returns the best bid price.
     /// If there is no best bid, it returns [`f64::NAN`].
     fn best_bid(&self) -> f64;
