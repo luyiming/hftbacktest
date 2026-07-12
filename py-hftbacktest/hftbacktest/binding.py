@@ -827,7 +827,7 @@ class HashMapMarketDepthBacktest:
             asset_no: Asset number at which this command will be executed.
             order_id: Order ID to modify.
             price: Order price.
-            qty: Order quantity.
+            qty: New total order quantity, including the cumulative executed quantity.
             wait: If `True`, wait until the order cancel response is received.
 
         Returns:
@@ -1270,7 +1270,7 @@ class ROIVectorMarketDepthBacktest:
             asset_no: Asset number at which this command will be executed.
             order_id: Order ID to modify.
             price: Order price.
-            qty: Order quantity.
+            qty: New total order quantity, including the cumulative executed quantity.
             wait: If `True`, wait until the order cancel response is received.
 
         Returns:

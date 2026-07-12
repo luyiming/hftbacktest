@@ -497,7 +497,7 @@ impl AnyClone for () {
 #[derive(Clone)]
 #[repr(C)]
 pub struct Order {
-    /// Order quantity
+    /// Total order quantity, including the cumulative executed quantity.
     pub qty: f64,
     /// The quantity of this order that has not yet been executed. It represents the remaining
     /// quantity that is still open or active in the market after any partial fills.
@@ -927,7 +927,8 @@ where
     /// * `asset_no` - Asset number at which this command will be executed.
     /// * `order_id` - Order ID to modify.
     /// * `price` - Order price.
-    /// * `qty` - Quantity to buy.
+    /// * `qty` - New total order quantity for L2 backtesting, including the cumulative executed
+    ///   quantity.
     /// * `wait` - If true, wait until the order modification response is received.
     fn modify(
         &mut self,

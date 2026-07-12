@@ -350,7 +350,11 @@ where
                             TimeInForce::GTC | TimeInForce::GTX => {
                                 // Initializes the order's queue position.
                                 self.queue_model.new_order(order, &self.depth);
-                                order.status = Status::New;
+                                order.status = if order.cum_exec_qty > 0.0 {
+                                    Status::PartiallyFilled
+                                } else {
+                                    Status::New
+                                };
                                 // The exchange accepts this order.
                                 self.buy_orders
                                     .entry(order.price_tick)
@@ -407,7 +411,11 @@ where
                             TimeInForce::GTC | TimeInForce::GTX => {
                                 // Initializes the order's queue position.
                                 self.queue_model.new_order(order, &self.depth);
-                                order.status = Status::New;
+                                order.status = if order.cum_exec_qty > 0.0 {
+                                    Status::PartiallyFilled
+                                } else {
+                                    Status::New
+                                };
                                 // The exchange accepts this order.
                                 self.sell_orders
                                     .entry(order.price_tick)
@@ -470,51 +478,37 @@ where
         Ok(())
     }
 
-    fn ack_modify<const RESET_QUEUE_POS: bool>(
-        &mut self,
-        order: &mut Order,
-        timestamp: i64,
-    ) -> Result<(), BacktestError> {
-        let (prev_order_price_tick, prev_leaves_qty) = {
-            let order_borrowed = self.orders.borrow();
-            let exch_order = order_borrowed.get(&order.order_id);
+    fn ack_modify(&mut self, order: &mut Order, timestamp: i64) -> Result<(), BacktestError> {
+        let requested_price_tick = order.price_tick;
+        let requested_qty = order.qty;
+        let request_timestamp = order.local_timestamp;
 
-            // The order can be already deleted due to fill or expiration.
-            if exch_order.is_none() {
-                order.req = Status::Rejected;
-                order.exch_timestamp = timestamp;
-                return Ok(());
-            }
-
-            let exch_order = exch_order.unwrap();
-            (exch_order.price_tick, exch_order.leaves_qty)
-        };
-
-        // The initialization of the order queue position may not occur when the modified quantity
-        // is smaller than the previous quantity, depending on the exchanges. It may need to
-        // implement exchange-specific specialization.
-        if RESET_QUEUE_POS
-            || prev_order_price_tick != order.price_tick
-            || order.qty > prev_leaves_qty
-        {
-            let mut cancel_order = order.clone();
-            self.ack_cancel(&mut cancel_order, timestamp)?;
-            self.ack_new(order, timestamp)?;
-            // todo: Status::Replaced or Status::New?
-        } else {
-            let mut order_borrowed = self.orders.borrow_mut();
-            let exch_order = order_borrowed.get_mut(&order.order_id);
-            let exch_order = exch_order.unwrap();
-
-            exch_order.qty = order.qty;
-            exch_order.leaves_qty = order.qty;
-            exch_order.exch_timestamp = timestamp;
-            // todo: Status::Replaced or Status::New?
-            exch_order.status = Status::New;
-            order.leaves_qty = order.qty;
-            order.exch_timestamp = timestamp;
-            order.status = Status::New;
+        self.ack_cancel(order, timestamp)?;
+        if order.req == Status::Rejected {
+            return Ok(());
         }
+        order.local_timestamp = request_timestamp;
+
+        let crosses_book = order.order_type == OrdType::Limit
+            && order.time_in_force == TimeInForce::GTX
+            && match order.side {
+                Side::Buy => requested_price_tick >= self.depth.best_ask_tick(),
+                Side::Sell => requested_price_tick <= self.depth.best_bid_tick(),
+                Side::None | Side::Unsupported => unreachable!(),
+            };
+        if (order.cum_exec_qty > 0.0 && requested_qty <= order.cum_exec_qty) || crosses_book {
+            return Ok(());
+        }
+
+        order.price_tick = requested_price_tick;
+        order.qty = requested_qty;
+        order.leaves_qty = requested_qty - order.cum_exec_qty;
+        order.status = if order.cum_exec_qty > 0.0 {
+            Status::PartiallyFilled
+        } else {
+            Status::New
+        };
+        self.ack_new(order, timestamp)?;
         Ok(())
     }
 }
@@ -636,7 +630,7 @@ where
             // Processes a modify order.
             else if order.req == Status::Replaced {
                 order.req = Status::None;
-                self.ack_modify::<false>(&mut order, timestamp)?;
+                self.ack_modify(&mut order, timestamp)?;
             } else {
                 return Err(BacktestError::InvalidOrderRequest);
             }

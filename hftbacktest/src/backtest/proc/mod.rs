@@ -53,7 +53,8 @@ where
     ///
     /// * `order_id` - Order ID to modify.
     /// * `price` - Order price.
-    /// * `qty` - Quantity to buy.
+    /// * `qty` - New total order quantity for L2 backtesting, including the cumulative executed
+    ///   quantity.
     /// * `current_timestamp` - The current backtesting timestamp.
     fn modify(
         &mut self,

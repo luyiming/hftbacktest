@@ -17,22 +17,10 @@ use crate::{
     depth::{INVALID_MAX, INVALID_MIN, L2MarketDepth, MarketDepth},
     prelude::OrdType,
     types::{
-        EXCH_ASK_DEPTH_CLEAR_EVENT,
-        EXCH_ASK_DEPTH_EVENT,
-        EXCH_ASK_DEPTH_SNAPSHOT_EVENT,
-        EXCH_BID_DEPTH_CLEAR_EVENT,
-        EXCH_BID_DEPTH_EVENT,
-        EXCH_BID_DEPTH_SNAPSHOT_EVENT,
-        EXCH_BUY_TRADE_EVENT,
-        EXCH_DEPTH_CLEAR_EVENT,
-        EXCH_EVENT,
-        EXCH_SELL_TRADE_EVENT,
-        Event,
-        Order,
-        OrderId,
-        Side,
-        Status,
-        TimeInForce,
+        EXCH_ASK_DEPTH_CLEAR_EVENT, EXCH_ASK_DEPTH_EVENT, EXCH_ASK_DEPTH_SNAPSHOT_EVENT,
+        EXCH_BID_DEPTH_CLEAR_EVENT, EXCH_BID_DEPTH_EVENT, EXCH_BID_DEPTH_SNAPSHOT_EVENT,
+        EXCH_BUY_TRADE_EVENT, EXCH_DEPTH_CLEAR_EVENT, EXCH_EVENT, EXCH_SELL_TRADE_EVENT, Event,
+        Order, OrderId, Side, Status, TimeInForce,
     },
 };
 
@@ -480,7 +468,11 @@ where
                             TimeInForce::GTC | TimeInForce::GTX => {
                                 // Initializes the order's queue position.
                                 self.queue_model.new_order(order, &self.depth);
-                                order.status = Status::New;
+                                order.status = if order.cum_exec_qty > 0.0 {
+                                    Status::PartiallyFilled
+                                } else {
+                                    Status::New
+                                };
                                 // The exchange accepts this order.
                                 self.buy_orders
                                     .entry(order.price_tick)
@@ -614,7 +606,11 @@ where
                             TimeInForce::GTC | TimeInForce::GTX => {
                                 // Initializes the order's queue position.
                                 self.queue_model.new_order(order, &self.depth);
-                                order.status = Status::New;
+                                order.status = if order.cum_exec_qty > 0.0 {
+                                    Status::PartiallyFilled
+                                } else {
+                                    Status::New
+                                };
                                 // The exchange accepts this order.
                                 self.sell_orders
                                     .entry(order.price_tick)
@@ -693,51 +689,37 @@ where
         Ok(())
     }
 
-    fn ack_modify<const RESET_QUEUE_POS: bool>(
-        &mut self,
-        order: &mut Order,
-        timestamp: i64,
-    ) -> Result<(), BacktestError> {
-        let (prev_order_price_tick, prev_leaves_qty) = {
-            let order_borrowed = self.orders.borrow();
-            let exch_order = order_borrowed.get(&order.order_id);
+    fn ack_modify(&mut self, order: &mut Order, timestamp: i64) -> Result<(), BacktestError> {
+        let requested_price_tick = order.price_tick;
+        let requested_qty = order.qty;
+        let request_timestamp = order.local_timestamp;
 
-            // The order can be already deleted due to fill or expiration.
-            if exch_order.is_none() {
-                order.req = Status::Rejected;
-                order.exch_timestamp = timestamp;
-                return Ok(());
-            }
-
-            let exch_order = exch_order.unwrap();
-            (exch_order.price_tick, exch_order.leaves_qty)
-        };
-
-        // The initialization of the order queue position may not occur when the modified quantity
-        // is smaller than the previous quantity, depending on the exchanges. It may need to
-        // implement exchange-specific specialization.
-        if RESET_QUEUE_POS
-            || prev_order_price_tick != order.price_tick
-            || order.qty > prev_leaves_qty
-        {
-            let mut cancel_order = order.clone();
-            self.ack_cancel(&mut cancel_order, timestamp)?;
-            self.ack_new(order, timestamp)?;
-            // todo: Status::Replaced or Status::New?
-        } else {
-            let mut order_borrowed = self.orders.borrow_mut();
-            let exch_order = order_borrowed.get_mut(&order.order_id);
-            let exch_order = exch_order.unwrap();
-
-            exch_order.qty = order.qty;
-            exch_order.leaves_qty = order.qty;
-            exch_order.exch_timestamp = timestamp;
-            // todo: Status::Replaced or Status::New?
-            exch_order.status = Status::New;
-            order.leaves_qty = order.qty;
-            order.exch_timestamp = timestamp;
-            order.status = Status::New;
+        self.ack_cancel(order, timestamp)?;
+        if order.req == Status::Rejected {
+            return Ok(());
         }
+        order.local_timestamp = request_timestamp;
+
+        let crosses_book = order.order_type == OrdType::Limit
+            && order.time_in_force == TimeInForce::GTX
+            && match order.side {
+                Side::Buy => requested_price_tick >= self.depth.best_ask_tick(),
+                Side::Sell => requested_price_tick <= self.depth.best_bid_tick(),
+                Side::None | Side::Unsupported => unreachable!(),
+            };
+        if (order.cum_exec_qty > 0.0 && requested_qty <= order.cum_exec_qty) || crosses_book {
+            return Ok(());
+        }
+
+        order.price_tick = requested_price_tick;
+        order.qty = requested_qty;
+        order.leaves_qty = requested_qty - order.cum_exec_qty;
+        order.status = if order.cum_exec_qty > 0.0 {
+            Status::PartiallyFilled
+        } else {
+            Status::New
+        };
+        self.ack_new(order, timestamp)?;
         Ok(())
     }
 }
@@ -859,7 +841,7 @@ where
             // Processes a modify order.
             else if order.req == Status::Replaced {
                 order.req = Status::None;
-                self.ack_modify::<false>(&mut order, timestamp)?;
+                self.ack_modify(&mut order, timestamp)?;
             } else {
                 return Err(BacktestError::InvalidOrderRequest);
             }
@@ -888,13 +870,15 @@ mod tests {
 
     use crate::{
         backtest::{
-            Backtest, DataSource, ExchangeKind, L2AssetBuilder, assettype::LinearAsset, data::Data,
+            Backtest, DataSource, ExchangeKind, L2AssetBuilder,
+            assettype::LinearAsset,
+            data::Data,
             models::{CommonFees, ConstantLatency, RiskAdverseQueueModel, TradingValueFeeModel},
         },
         depth::BTreeMarketDepth,
         prelude::{Bot, OrdType, Side, TimeInForce},
         types::{
-            BUY_EVENT, DEPTH_EVENT, EXCH_EVENT, EXCH_BUY_TRADE_EVENT, EXCH_SELL_TRADE_EVENT, Event,
+            BUY_EVENT, DEPTH_EVENT, EXCH_BUY_TRADE_EVENT, EXCH_EVENT, EXCH_SELL_TRADE_EVENT, Event,
             LOCAL_EVENT, SELL_EVENT, Status,
         },
     };
@@ -918,10 +902,14 @@ mod tests {
     }
 
     fn empty_event() -> Event {
+        empty_event_at(0)
+    }
+
+    fn empty_event_at(timestamp: i64) -> Event {
         Event {
             ev: EXCH_EVENT | LOCAL_EVENT,
-            exch_ts: 0,
-            local_ts: 0,
+            exch_ts: timestamp,
+            local_ts: timestamp,
             px: 0.0,
             qty: 0.0,
             order_id: 0,
@@ -952,11 +940,20 @@ mod tests {
         events: &[Event],
         exchange: ExchangeKind,
     ) -> Result<Backtest<BTreeMarketDepth>, Box<dyn Error>> {
+        backtest_with_latency(events, exchange, 0, 0)
+    }
+
+    fn backtest_with_latency(
+        events: &[Event],
+        exchange: ExchangeKind,
+        entry_latency: i64,
+        response_latency: i64,
+    ) -> Result<Backtest<BTreeMarketDepth>, Box<dyn Error>> {
         Ok(Backtest::builder()
             .add_asset(
                 L2AssetBuilder::default()
                     .data(vec![DataSource::Data(Data::from_data(events))])
-                    .latency_model(ConstantLatency::new(0, 0))
+                    .latency_model(ConstantLatency::new(entry_latency, response_latency))
                     .asset_type(LinearAsset::new(1.0))
                     .fee_model(TradingValueFeeModel::new(CommonFees::new(0.0, 0.0)))
                     .queue_model(RiskAdverseQueueModel::new())
@@ -1100,6 +1097,217 @@ mod tests {
         assert_close(order.exec_price(), 100.0);
         assert_eq!(order.taker_price_level_count, 1);
         assert_close(hbt.position(0), 5.0);
+        Ok(())
+    }
+
+    #[test]
+    fn modify_uses_total_quantity_and_cancels_at_cumulative_fill() -> Result<(), Box<dyn Error>> {
+        let mut hbt = backtest(
+            &[
+                depth_event(Side::Buy, 100.0, 1.0),
+                depth_event(Side::Sell, 101.0, 10.0),
+                trade_event(Side::Sell, 1, 100.0, 4.0),
+                empty_event_at(3),
+            ],
+            ExchangeKind::PartialFillExchange,
+        )?;
+        let _ = hbt.elapse(0)?;
+        hbt.submit_buy_order(0, 1, 100.0, 10.0, TimeInForce::GTC, OrdType::Limit, true)?;
+        hbt.elapse(2)?;
+
+        hbt.modify(0, 1, 100.0, 5.0, true)?;
+        let order = hbt.orders(0).get(&1).expect("order should exist");
+        assert_eq!(order.status, Status::PartiallyFilled);
+        assert_close(order.qty, 5.0);
+        assert_close(order.leaves_qty, 2.0);
+        assert_close(order.cum_exec_qty, 3.0);
+        assert_close(order.cum_exec_value, 300.0);
+
+        hbt.modify(0, 1, 99.0, 3.0, true)?;
+        let order = hbt.orders(0).get(&1).expect("order should exist");
+        assert_eq!(order.status, Status::Canceled);
+        assert_close(order.price(), 100.0); // price remain the old price
+        assert_close(order.qty, 5.0);
+        assert_close(order.leaves_qty, 2.0);
+        assert_close(order.cum_exec_qty, 3.0);
+        assert_close(order.cum_exec_value, 300.0);
+        assert_close(hbt.position(0), 3.0);
+        Ok(())
+    }
+
+    #[test]
+    fn gtc_modify_crosses_with_only_new_leaves_quantity() -> Result<(), Box<dyn Error>> {
+        let mut hbt = backtest(
+            &[
+                depth_event(Side::Buy, 100.0, 1.0),
+                depth_event(Side::Sell, 101.0, 1.0),
+                trade_event(Side::Sell, 1, 100.0, 4.0),
+                empty_event_at(3),
+            ],
+            ExchangeKind::PartialFillExchange,
+        )?;
+        let _ = hbt.elapse(0)?;
+        hbt.submit_buy_order(0, 1, 100.0, 10.0, TimeInForce::GTC, OrdType::Limit, true)?;
+        hbt.elapse(2)?;
+
+        hbt.modify(0, 1, 105.0, 8.0, true)?;
+
+        let order = hbt.orders(0).get(&1).expect("order should exist");
+        assert_eq!(order.status, Status::Filled);
+        assert!(!order.maker);
+        assert_close(order.price(), 105.0);
+        assert_close(order.exec_price(), (100.0 * 3.0 + 101.0 * 1.0 + 105.0 * 4.0) / 8.0);
+        assert_close(order.qty, 8.0);
+        assert_close(order.leaves_qty, 0.0);
+        assert_close(order.cum_exec_qty, 8.0);
+        assert_close(hbt.position(0), 8.0);
+        Ok(())
+    }
+
+    #[test]
+    fn gtx_crossing_modify_cancels_original_order() -> Result<(), Box<dyn Error>> {
+        for (exchange, side, original_price, requested_price) in [
+            (ExchangeKind::PartialFillExchange, Side::Buy, 99.0, 101.0),
+            (ExchangeKind::PartialFillExchange, Side::Sell, 102.0, 100.0),
+            (ExchangeKind::NoPartialFillExchange, Side::Buy, 99.0, 101.0),
+            (
+                ExchangeKind::NoPartialFillExchange,
+                Side::Sell,
+                102.0,
+                100.0,
+            ),
+        ] {
+            let mut hbt = backtest(
+                &[
+                    depth_event(Side::Buy, 100.0, 10.0),
+                    depth_event(Side::Sell, 101.0, 10.0),
+                ],
+                exchange,
+            )?;
+            let _ = hbt.elapse(0)?;
+            match side {
+                Side::Buy => hbt.submit_buy_order(
+                    0,
+                    1,
+                    original_price,
+                    5.0,
+                    TimeInForce::GTX,
+                    OrdType::Limit,
+                    true,
+                )?,
+                Side::Sell => hbt.submit_sell_order(
+                    0,
+                    1,
+                    original_price,
+                    5.0,
+                    TimeInForce::GTX,
+                    OrdType::Limit,
+                    true,
+                )?,
+                Side::None | Side::Unsupported => unreachable!(),
+            };
+
+            hbt.modify(0, 1, requested_price, 7.0, true)?;
+
+            let order = hbt.orders(0).get(&1).expect("order should exist");
+            assert_eq!(order.status, Status::Canceled);
+            assert_close(order.price(), original_price);
+            assert_close(order.qty, 5.0);
+            assert_close(order.leaves_qty, 5.0);
+            assert_close(order.cum_exec_qty, 0.0);
+            assert_close(hbt.position(0), 0.0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn gtc_crossing_modify_fills_new_total_quantity() -> Result<(), Box<dyn Error>> {
+        for exchange in [
+            ExchangeKind::PartialFillExchange,
+            ExchangeKind::NoPartialFillExchange,
+        ] {
+            let mut hbt = backtest(
+                &[
+                    depth_event(Side::Buy, 100.0, 10.0),
+                    depth_event(Side::Sell, 101.0, 2.0),
+                ],
+                exchange,
+            )?;
+            let _ = hbt.elapse(0)?;
+            hbt.submit_buy_order(0, 1, 99.0, 5.0, TimeInForce::GTC, OrdType::Limit, true)?;
+
+            hbt.modify(0, 1, 101.0, 7.0, true)?;
+
+            let order = hbt.orders(0).get(&1).expect("order should exist");
+            assert_eq!(order.status, Status::Filled);
+            assert!(!order.maker);
+            assert_close(order.qty, 7.0);
+            assert_close(order.leaves_qty, 0.0);
+            assert_close(order.cum_exec_qty, 7.0);
+            assert_close(hbt.position(0), 7.0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn same_price_modify_resets_queue_position() -> Result<(), Box<dyn Error>> {
+        for exchange in [
+            ExchangeKind::PartialFillExchange,
+            ExchangeKind::NoPartialFillExchange,
+        ] {
+            let mut hbt = backtest(
+                &[
+                    depth_event(Side::Buy, 100.0, 10.0),
+                    depth_event(Side::Sell, 101.0, 10.0),
+                    trade_event(Side::Sell, 1, 100.0, 4.0),
+                    trade_event(Side::Sell, 3, 100.0, 7.0),
+                    empty_event_at(5),
+                ],
+                exchange,
+            )?;
+            let _ = hbt.elapse(0)?;
+            hbt.submit_buy_order(0, 1, 100.0, 5.0, TimeInForce::GTX, OrdType::Limit, true)?;
+            hbt.elapse(2)?;
+
+            hbt.modify(0, 1, 100.0, 4.0, true)?;
+            hbt.elapse(2)?;
+
+            let order = hbt.orders(0).get(&1).expect("order should exist");
+            assert_eq!(order.status, Status::New);
+            assert_close(order.qty, 4.0);
+            assert_close(order.leaves_qty, 4.0);
+            assert_close(order.cum_exec_qty, 0.0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn modify_preserves_fills_during_entry_latency() -> Result<(), Box<dyn Error>> {
+        let mut hbt = backtest_with_latency(
+            &[
+                depth_event(Side::Buy, 100.0, 1.0),
+                depth_event(Side::Sell, 101.0, 10.0),
+                trade_event(Side::Sell, 5, 100.0, 4.0),
+                empty_event_at(10),
+            ],
+            ExchangeKind::PartialFillExchange,
+            3,
+            0,
+        )?;
+        let _ = hbt.elapse(0)?;
+        hbt.submit_buy_order(0, 1, 100.0, 10.0, TimeInForce::GTC, OrdType::Limit, true)?;
+
+        hbt.modify(0, 1, 100.0, 5.0, true)?;
+        hbt.elapse(2)?;
+
+        let order = hbt.orders(0).get(&1).expect("order should exist");
+        assert_eq!(order.status, Status::PartiallyFilled);
+        assert_close(order.qty, 5.0);
+        assert_close(order.leaves_qty, 2.0);
+        assert_close(order.cum_exec_qty, 3.0);
+        assert_close(order.cum_exec_value, 300.0);
+        assert_close(hbt.position(0), 3.0);
+
         Ok(())
     }
 }
