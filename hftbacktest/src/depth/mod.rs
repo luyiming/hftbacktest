@@ -120,7 +120,7 @@ pub trait ApplySnapshot {
 }
 
 /// Level3 order from the market feed.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct L3Order {
     pub order_id: OrderId,
     pub side: Side,

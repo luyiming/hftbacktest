@@ -6,7 +6,7 @@ use crate::{
     types::{Order, StateValues},
 };
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct State<AT, FM>
 where
     AT: AssetType,

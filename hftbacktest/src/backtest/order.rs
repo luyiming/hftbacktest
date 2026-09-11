@@ -1,6 +1,9 @@
 use std::{cell::UnsafeCell, collections::VecDeque, rc::Rc};
 
-use crate::{backtest::models::LatencyModel, types::Order};
+use crate::{
+    backtest::{models::LatencyModel, snapshot::SnapshotContext},
+    types::Order,
+};
 
 /// Provides a bus for transporting backtesting orders between the exchange and the local model
 /// based on the given timestamp.
@@ -10,6 +13,18 @@ pub struct OrderBus {
 }
 
 impl OrderBus {
+    /// Copies pending messages once per branch, preserving its internal bus connections.
+    pub fn snapshot(&self, context: &mut SnapshotContext) -> Self {
+        let key = Rc::as_ptr(&self.order_list) as usize;
+        context
+            .buses
+            .entry(key)
+            .or_insert_with(|| Self {
+                order_list: Rc::new(UnsafeCell::new(unsafe { &*self.order_list.get() }.clone())),
+            })
+            .clone()
+    }
+
     /// Constructs an instance of ``OrderBus``.
     pub fn new() -> Self {
         Default::default()
@@ -78,6 +93,17 @@ impl<LM> ExchToLocal<LM>
 where
     LM: LatencyModel,
 {
+    pub(crate) fn snapshot(&self, context: &mut SnapshotContext) -> Self
+    where
+        LM: crate::backtest::snapshot::SnapshotState,
+    {
+        Self {
+            to_exch: self.to_exch.snapshot(context),
+            to_local: self.to_local.snapshot(context),
+            order_latency: self.order_latency.clone(),
+        }
+    }
+
     /// Returns the timestamp of the earliest order to be received by the exchange from the local.
     pub fn earliest_recv_order_timestamp(&self) -> Option<i64> {
         self.to_exch.earliest_timestamp()
@@ -122,6 +148,17 @@ impl<LM> LocalToExch<LM>
 where
     LM: LatencyModel,
 {
+    pub(crate) fn snapshot(&self, context: &mut SnapshotContext) -> Self
+    where
+        LM: crate::backtest::snapshot::SnapshotState,
+    {
+        Self {
+            to_exch: self.to_exch.snapshot(context),
+            to_local: self.to_local.snapshot(context),
+            order_latency: self.order_latency.clone(),
+        }
+    }
+
     /// Returns the timestamp of the earliest order to be received by the local from the exchange.
     pub fn earliest_recv_order_timestamp(&self) -> Option<i64> {
         self.to_local.earliest_timestamp()

@@ -21,7 +21,7 @@ use crate::{
 /// update would cross the BBO because a delete was missed, the crossed best level is skipped by
 /// moving to the next valid sparse level. This ignores obviously stale crossed levels but cannot
 /// reconstruct missing quantity updates or deep-book levels that were never received.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct BTreeMarketDepth {
     pub depth_ready: bool,
     pub tick_size: f64,

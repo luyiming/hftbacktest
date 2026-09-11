@@ -59,6 +59,9 @@ pub mod recorder;
 pub mod data;
 mod evs;
 
+/// In-memory replay checkpoints.
+pub mod snapshot;
+
 /// Errors that can occur during backtesting.
 #[derive(Error, Debug)]
 pub enum BacktestError {
@@ -252,6 +255,40 @@ where
 
     /// Builds an `Asset`.
     pub fn build(self) -> Result<Asset<dyn LocalProcessor<MD>, dyn Processor, Event>, BuildError> {
+        self.build_with(|local| local, |exch| exch, |exch| exch)
+    }
+
+    /// Builds an L2 asset with independent in-memory snapshot support.
+    ///
+    /// Models explicitly opt into `SnapshotState`; ordinary `Clone` alone does not guarantee
+    /// independent simulation state. Existing `build` behavior is unchanged.
+    pub fn build_snapshotable(
+        self,
+    ) -> Result<Asset<dyn LocalProcessor<MD>, dyn Processor, Event>, BuildError>
+    where
+        AT: snapshot::SnapshotState,
+        LM: snapshot::SnapshotState,
+        MD: snapshot::SnapshotState,
+        QM: snapshot::SnapshotState,
+        FM: snapshot::SnapshotState,
+    {
+        self.build_with(
+            |local| local.enable_snapshot(),
+            |exch| exch.enable_snapshot(),
+            |exch| exch.enable_snapshot(),
+        )
+    }
+
+    fn build_with(
+        self,
+        prepare_local: impl FnOnce(Local<AT, LM, MD, FM>) -> Local<AT, LM, MD, FM>,
+        prepare_no_partial: impl FnOnce(
+            NoPartialFillExchange<AT, LM, QM, MD, FM>,
+        ) -> NoPartialFillExchange<AT, LM, QM, MD, FM>,
+        prepare_partial: impl FnOnce(
+            PartialFillExchange<AT, LM, QM, MD, FM>,
+        ) -> PartialFillExchange<AT, LM, QM, MD, FM>,
+    ) -> Result<Asset<dyn LocalProcessor<MD>, dyn Processor, Event>, BuildError> {
         let reader = if self.latency_offset == 0 {
             Reader::builder()
                 .parallel_load(self.parallel_load)
@@ -286,12 +323,12 @@ where
 
         let (order_e2l, order_l2e) = order_bus(order_latency);
 
-        let local = Local::new(
+        let local = prepare_local(Local::new(
             create_depth(),
             State::new(asset_type, fee_model),
             self.last_trades_cap,
             order_l2e,
-        );
+        ));
 
         let queue_model = self
             .queue_model
@@ -307,12 +344,12 @@ where
 
         match self.exch_kind {
             ExchangeKind::NoPartialFillExchange => {
-                let exch = NoPartialFillExchange::new(
+                let exch = prepare_no_partial(NoPartialFillExchange::new(
                     create_depth(),
                     State::new(asset_type, fee_model),
                     queue_model,
                     order_e2l,
-                );
+                ));
 
                 Ok(Asset {
                     local: Box::new(local),
@@ -321,12 +358,12 @@ where
                 })
             }
             ExchangeKind::PartialFillExchange => {
-                let exch = PartialFillExchange::new(
+                let exch = prepare_partial(PartialFillExchange::new(
                     create_depth(),
                     State::new(asset_type, fee_model),
                     queue_model,
                     order_e2l,
-                );
+                ));
 
                 Ok(Asset {
                     local: Box::new(local),
@@ -628,6 +665,13 @@ pub struct BacktestProcessorState<P: Processor> {
     processor: P,
     reader: Reader<Event>,
     row: Option<usize>,
+}
+
+impl<P: Processor> Drop for BacktestProcessorState<P> {
+    fn drop(&mut self) {
+        self.reader
+            .release(std::mem::replace(&mut self.data, Data::empty()));
+    }
 }
 
 impl<P: Processor> BacktestProcessorState<P> {

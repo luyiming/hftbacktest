@@ -47,6 +47,7 @@ where
     count: usize,
     ready: bool,
     data: Data<D>,
+    error: Option<Arc<IoError>>,
 }
 
 impl<D> CachedData<D>
@@ -58,6 +59,7 @@ where
             count: 0,
             ready: true,
             data,
+            error: None,
         }
     }
 
@@ -66,6 +68,7 @@ where
             count: 0,
             ready: false,
             data: Data::empty(),
+            error: None,
         }
     }
 
@@ -79,6 +82,7 @@ where
     }
 
     pub fn turn_in(&mut self) -> bool {
+        assert!(self.count > 0, "released data should have an active reader");
         self.count -= 1;
         self.count == 0
     }
@@ -95,6 +99,36 @@ impl<D> Cache<D>
 where
     D: POD + Clone,
 {
+    fn retain(&mut self, data: &Data<D>) {
+        let mut cache = self.0.borrow_mut();
+        if let Some(cached) = cache.values_mut().find(|cached| data.data_eq(&cached.data)) {
+            cached.count += 1;
+        } else {
+            assert!(
+                data.is_empty(),
+                "active processor data should remain in its reader cache"
+            );
+        }
+    }
+
+    fn fail(&mut self, key: &str, error: IoError) {
+        let mut cache = self.0.borrow_mut();
+        let cached = cache
+            .get_mut(key)
+            .expect("loading data should have a cache entry");
+        cached.error = Some(Arc::new(error));
+        cached.ready = true;
+    }
+
+    fn error(&self, key: &str) -> Option<Arc<IoError>> {
+        self.0
+            .borrow()
+            .get(key)
+            .expect("requested data should have a cache entry")
+            .error
+            .clone()
+    }
+
     /// Constructs an instance of `Cache`.
     pub fn new() -> Self {
         Self(Default::default())
@@ -185,6 +219,14 @@ where
 {
     key: String,
     result: Result<DataSend<D>, IoError>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("failed to read {path}")]
+struct FileLoadError {
+    path: String,
+    #[source]
+    source: Arc<IoError>,
 }
 
 impl<D> LoadDataResult<D>
@@ -293,17 +335,20 @@ where
     /// Builds a [`Reader`].
     pub fn build(self) -> Result<Reader<D>, IoError> {
         let mut cache = self.cache.clone();
+        let mut memory_data = HashMap::new();
         for (key, mut data) in self.temporary_data {
             if let Some(p) = &self.preprocessor {
                 p.preprocess(&mut data)?;
             }
-            cache.insert(key, data)
+            cache.insert(key.clone(), data.clone());
+            memory_data.insert(key, data);
         }
 
         let (tx, rx) = channel();
         Ok(Reader {
-            data_key_list: self.data_key_list.clone(),
+            data_key_list: self.data_key_list.into(),
             cache,
+            memory_data: Rc::new(memory_data),
             data_num: 0,
             tx,
             rx: Rc::new(rx),
@@ -319,8 +364,10 @@ pub struct Reader<D>
 where
     D: NpyDTyped + Clone,
 {
-    data_key_list: Vec<String>,
+    data_key_list: Rc<[String]>,
     cache: Cache<D>,
+    // Unlike files, supplied memory buffers cannot be reloaded after cache eviction.
+    memory_data: Rc<HashMap<String, Data<D>>>,
     data_num: usize,
     tx: Sender<LoadDataResult<D>>,
     rx: Rc<Receiver<LoadDataResult<D>>>,
@@ -332,6 +379,10 @@ impl<D> Reader<D>
 where
     D: NpyDTyped + Clone + 'static,
 {
+    pub(crate) fn retain(&mut self, data: &Data<D>) {
+        self.cache.retain(data);
+    }
+
     /// Returns a [`ReaderBuilder`].
     pub fn builder() -> ReaderBuilder<D> {
         ReaderBuilder::default()
@@ -365,14 +416,20 @@ where
                         self.cache.set(&key, data.unwrap());
                     }
                     LoadDataResult {
-                        result: Err(err), ..
-                    } => {
-                        return Err(BacktestError::DataError(std::io::Error::new(
-                            err.kind(),
-                            format!("Failed to read file '{key}': {err}"),
-                        )));
-                    }
+                        key,
+                        result: Err(err),
+                    } => self.cache.fail(&key, err),
                 }
+            }
+
+            if let Some(error) = self.cache.error(&key) {
+                return Err(BacktestError::DataError(IoError::new(
+                    error.kind(),
+                    FileLoadError {
+                        path: key,
+                        source: error,
+                    },
+                )));
             }
 
             let data = self.cache.get(&key);
@@ -385,6 +442,10 @@ where
 
     fn load_data(&mut self, key: &str) -> Result<(), BacktestError> {
         if !self.cache.contains(key) {
+            if let Some(data) = self.memory_data.get(key) {
+                self.cache.insert(key.to_string(), data.clone());
+                return Ok(());
+            }
             self.cache.prepare(key.to_string());
 
             if key.ends_with(".npy") {
@@ -436,10 +497,10 @@ where
                     }
                 });
             } else {
-                return Err(BacktestError::DataError(IoError::new(
-                    ErrorKind::InvalidData,
-                    "unsupported data type",
-                )));
+                self.cache.fail(
+                    key,
+                    IoError::new(ErrorKind::InvalidData, "unsupported data type"),
+                );
             }
         }
         Ok(())

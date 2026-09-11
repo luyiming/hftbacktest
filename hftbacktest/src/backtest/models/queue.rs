@@ -41,6 +41,7 @@ where
 
 /// Provides a conservative queue position model, where your order's queue position advances only
 /// when trades occur at the same price level.
+#[derive(Clone)]
 pub struct RiskAdverseQueueModel<MD>(PhantomData<MD>);
 
 impl AnyClone for f64 {

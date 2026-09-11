@@ -7,6 +7,7 @@ use crate::{
         models::{FeeModel, LatencyModel},
         order::LocalToExch,
         proc::{LocalProcessor, Processor},
+        snapshot::{LocalSnapshotFn, SnapshotContext, SnapshotError, SnapshotState},
         state::State,
     },
     depth::{L2MarketDepth, MarketDepth},
@@ -46,6 +47,7 @@ where
     trades: Vec<Event>,
     last_feed_latency: Option<(i64, i64)>,
     last_order_latency: Option<(i64, i64, i64)>,
+    snapshot_fn: Option<LocalSnapshotFn<Self, MD>>,
 }
 
 impl<AT, LM, MD, FM> Local<AT, LM, MD, FM>
@@ -70,7 +72,33 @@ where
             trades: Vec::with_capacity(last_trades_cap),
             last_feed_latency: None,
             last_order_latency: None,
+            snapshot_fn: None,
         }
+    }
+
+    pub(crate) fn enable_snapshot(mut self) -> Self
+    where
+        AT: SnapshotState + 'static,
+        LM: SnapshotState + 'static,
+        MD: L2MarketDepth + SnapshotState + 'static,
+        FM: SnapshotState + 'static,
+    {
+        self.snapshot_fn = Some(|source, context| {
+            // Capacity is the retention limit, including when the trade buffer is empty.
+            let mut trades = Vec::with_capacity(source.trades.capacity());
+            trades.extend_from_slice(&source.trades);
+            Box::new(Self {
+                orders: source.orders.clone(),
+                order_l2e: source.order_l2e.snapshot(context),
+                depth: source.depth.clone(),
+                state: source.state.clone(),
+                trades,
+                last_feed_latency: source.last_feed_latency,
+                last_order_latency: source.last_order_latency,
+                snapshot_fn: source.snapshot_fn,
+            })
+        });
+        self
     }
 
     pub fn process_recv_order_<const USE_HANDLER: bool, Handler>(
@@ -150,6 +178,16 @@ where
     MD: MarketDepth + L2MarketDepth,
     FM: FeeModel,
 {
+    fn snapshot_local(
+        &self,
+        context: &mut SnapshotContext,
+    ) -> Result<Box<dyn LocalProcessor<MD>>, SnapshotError> {
+        let snapshot = self
+            .snapshot_fn
+            .ok_or(SnapshotError::Unsupported("L2 local processor"))?;
+        Ok(snapshot(self, context))
+    }
+
     fn submit_order(
         &mut self,
         order_id: OrderId,

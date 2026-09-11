@@ -16,7 +16,10 @@ pub use l3_local::L3Local;
 pub use l3_nopartialfillexchange::L3NoPartialFillExchange;
 
 use crate::{
-    backtest::BacktestError,
+    backtest::{
+        BacktestError,
+        snapshot::{SnapshotContext, SnapshotError},
+    },
     depth::MarketDepth,
     prelude::{Event, OrdType, Order, OrderId, Side, StateValues, TimeInForce},
 };
@@ -26,6 +29,15 @@ pub trait LocalProcessor<MD>: Processor
 where
     MD: MarketDepth,
 {
+    /// Copies local simulation state, reconnecting its buses through the branch context.
+    /// The default explicitly rejects processors without snapshot support.
+    fn snapshot_local(
+        &self,
+        _context: &mut SnapshotContext,
+    ) -> Result<Box<dyn LocalProcessor<MD>>, SnapshotError> {
+        Err(SnapshotError::Unsupported("local processor"))
+    }
+
     /// Submits a new order.
     ///
     /// * `order_id` - The unique order ID; there should not be any existing order with the same ID
@@ -102,6 +114,13 @@ where
 }
 
 impl<P: Processor + ?Sized> Processor for Box<P> {
+    fn snapshot_processor(
+        &self,
+        context: &mut SnapshotContext,
+    ) -> Result<Box<dyn Processor>, SnapshotError> {
+        P::snapshot_processor(self, context)
+    }
+
     fn event_seen_timestamp(&self, event: &Event) -> Option<i64> {
         P::event_seen_timestamp(self, event)
     }
@@ -128,6 +147,15 @@ impl<P: Processor + ?Sized> Processor for Box<P> {
 }
 /// Processes the historical feed data and the order interaction.
 pub trait Processor {
+    /// Copies processor state without advancing it or sharing mutable state with the source.
+    /// Connected processors must use the same context to reconstruct branch-local order buses.
+    fn snapshot_processor(
+        &self,
+        _context: &mut SnapshotContext,
+    ) -> Result<Box<dyn Processor>, SnapshotError> {
+        Err(SnapshotError::Unsupported("exchange processor"))
+    }
+
     /// The time of an event as seen by this [Processor]. For a local event processor this will
     /// be the timestamp an event was seen at locally, and for an exchange processor this will
     /// be the timestamp an event was generated at on the exchange.

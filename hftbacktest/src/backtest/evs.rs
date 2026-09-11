@@ -27,6 +27,12 @@ pub struct EventSet {
 }
 
 impl EventSet {
+    pub(crate) fn snapshot(&self) -> Self {
+        let mut snapshot = Self::new(self.timestamp.len() / 4);
+        snapshot.timestamp.copy_from_slice(&self.timestamp);
+        snapshot
+    }
+
     /// Constructs an instance of `EventSet`.
     pub fn new(num_assets: usize) -> Self {
         if num_assets == 0 {

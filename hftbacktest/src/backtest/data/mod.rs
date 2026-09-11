@@ -131,7 +131,9 @@ where
         if i + size > self.ptr.len() {
             panic!("Out of the size.");
         }
-        unsafe { &mut *(self.ptr.at(i) as *mut D) }
+        // Published feed buffers may be retained by readers and checkpoints.
+        let ptr = Rc::make_mut(&mut self.ptr);
+        unsafe { &mut *(ptr.at(i) as *mut D) }
     }
 }
 
@@ -139,6 +141,19 @@ where
 pub struct DataPtr {
     ptr: *mut [u8],
     managed: bool,
+}
+
+impl Clone for DataPtr {
+    fn clone(&self) -> Self {
+        if self.len() == 0 {
+            return Self::default();
+        }
+        let copy = Self::new(self.len());
+        unsafe {
+            std::ptr::copy_nonoverlapping(self.ptr as *const u8, copy.ptr as *mut u8, self.len());
+        }
+        copy
+    }
 }
 
 impl DataPtr {

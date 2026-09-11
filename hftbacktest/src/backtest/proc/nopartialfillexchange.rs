@@ -12,6 +12,7 @@ use crate::{
         models::{FeeModel, LatencyModel, QueueModel},
         order::ExchToLocal,
         proc::Processor,
+        snapshot::{ProcessorSnapshotFn, SnapshotContext, SnapshotError, SnapshotState},
         state::State,
     },
     depth::{INVALID_MAX, INVALID_MIN, L2MarketDepth, MarketDepth},
@@ -82,6 +83,7 @@ where
     queue_model: QM,
 
     filled_orders: Vec<OrderId>,
+    snapshot_fn: Option<ProcessorSnapshotFn<Self>>,
 }
 
 impl<AT, LM, QM, MD, FM> NoPartialFillExchange<AT, LM, QM, MD, FM>
@@ -108,7 +110,32 @@ where
             state,
             queue_model,
             filled_orders: Default::default(),
+            snapshot_fn: None,
         }
+    }
+
+    pub(crate) fn enable_snapshot(mut self) -> Self
+    where
+        AT: SnapshotState + 'static,
+        LM: SnapshotState + 'static,
+        QM: SnapshotState + 'static,
+        MD: L2MarketDepth + SnapshotState + 'static,
+        FM: SnapshotState + 'static,
+    {
+        self.snapshot_fn = Some(|source, context| {
+            Box::new(Self {
+                orders: Rc::new(RefCell::new(source.orders.borrow().clone())),
+                buy_orders: source.buy_orders.clone(),
+                sell_orders: source.sell_orders.clone(),
+                order_e2l: source.order_e2l.snapshot(context),
+                depth: source.depth.clone(),
+                state: source.state.clone(),
+                queue_model: source.queue_model.clone(),
+                filled_orders: source.filled_orders.clone(),
+                snapshot_fn: source.snapshot_fn,
+            })
+        });
+        self
     }
 
     fn check_if_sell_filled(
@@ -521,6 +548,16 @@ where
     MD: MarketDepth + L2MarketDepth,
     FM: FeeModel,
 {
+    fn snapshot_processor(
+        &self,
+        context: &mut SnapshotContext,
+    ) -> Result<Box<dyn Processor>, SnapshotError> {
+        let snapshot = self
+            .snapshot_fn
+            .ok_or(SnapshotError::Unsupported("NoPartialFillExchange"))?;
+        Ok(snapshot(self, context))
+    }
+
     fn event_seen_timestamp(&self, event: &Event) -> Option<i64> {
         event.is(EXCH_EVENT).then_some(event.exch_ts)
     }
