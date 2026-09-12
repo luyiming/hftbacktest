@@ -11,7 +11,7 @@ use crate::{
         assettype::AssetType,
         models::{FeeModel, LatencyModel, QueueModel},
         order::ExchToLocal,
-        proc::Processor,
+        proc::{Processor, price_match::resolve_price_match},
         snapshot::{ProcessorSnapshotFn, SnapshotContext, SnapshotError, SnapshotState},
         state::State,
     },
@@ -347,6 +347,12 @@ where
         if self.orders.borrow().contains_key(&order.order_id) {
             return Err(BacktestError::OrderIdExist);
         }
+        let Some(price_tick) = resolve_price_match(order, &self.depth) else {
+            order.status = Status::Expired;
+            order.exch_timestamp = timestamp;
+            return Ok(());
+        };
+        order.price_tick = price_tick;
 
         if order.side == Side::Buy {
             match order.order_type {
@@ -506,7 +512,8 @@ where
     }
 
     fn ack_modify(&mut self, order: &mut Order, timestamp: i64) -> Result<(), BacktestError> {
-        let requested_price_tick = order.price_tick;
+        let requested_price_tick = resolve_price_match(order, &self.depth);
+        let requested_price_match = order.price_match;
         let requested_qty = order.qty;
         let request_timestamp = order.local_timestamp;
 
@@ -515,6 +522,10 @@ where
             return Ok(());
         }
         order.local_timestamp = request_timestamp;
+        order.price_match = requested_price_match;
+        let Some(requested_price_tick) = requested_price_tick else {
+            return Ok(());
+        };
 
         let crosses_book = order.order_type == OrdType::Limit
             && order.time_in_force == TimeInForce::GTX

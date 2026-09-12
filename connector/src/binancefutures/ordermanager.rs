@@ -75,6 +75,9 @@ impl OrderManager {
                 resp.order.original_qty - resp.order.order_filled_accumulated_qty;
             order_ext.order.side = resp.order.side;
             order_ext.order.time_in_force = resp.order.time_in_force;
+            order_ext.order.price_tick =
+                (resp.order.original_price / order_ext.order.tick_size).round() as i64;
+            order_ext.order.price_match = resp.order.price_match;
             order_ext.order.exch_timestamp = resp.transaction_time * 1_000_000;
             order_ext.order.status = resp.order.order_status;
             order_ext.order.exec_price_tick =
@@ -157,6 +160,15 @@ impl OrderManager {
         }
     }
 
+    pub fn update_modify_fail(
+        &mut self,
+        client_order_id: &ClientOrderId,
+        error: &BinanceFuturesError,
+    ) -> Option<Order> {
+        error!(?error, "modify error");
+        self.update_from_rest_fail(client_order_id, None)
+    }
+
     pub fn update_from_rest_fail(
         &mut self,
         client_order_id: &ClientOrderId,
@@ -210,6 +222,8 @@ impl OrderManager {
             order_ext.order.leaves_qty = resp.orig_qty - resp.cum_qty;
             order_ext.order.side = resp.side;
             order_ext.order.time_in_force = resp.time_in_force;
+            order_ext.order.price_tick = (resp.price / order_ext.order.tick_size).round() as i64;
+            order_ext.order.price_match = resp.price_match;
             order_ext.order.exch_timestamp = resp.update_time * 1_000_000;
             order_ext.order.status = resp.status;
             // The last filled price isn't available in the REST response.
@@ -273,6 +287,14 @@ impl OrderManager {
         self.order_id_map
             .get(&RefSymbolOrderId::new(symbol, order_id))
             .cloned()
+    }
+
+    pub fn prepare_modify(&mut self, symbol: &str, request: &Order) -> Option<String> {
+        let client_order_id = self.get_client_order_id(symbol, request.order_id)?;
+        let order_ext = self.orders.get_mut(&client_order_id)?;
+        order_ext.order.local_timestamp = request.local_timestamp;
+        order_ext.order.req = Status::Replaced;
+        Some(client_order_id)
     }
 
     /// Due to API instability or network issues, discrepancies can occur where an order is deleted

@@ -82,6 +82,10 @@ fn run_receive_task(
                                 // Requests to the Connector cancel the order.
                                 connector.cancel(asset, order, tx.clone());
                             }
+                            Status::Replaced => {
+                                // Requests to the Connector modify the order.
+                                connector.modify(asset, order, tx.clone());
+                            }
                             status => {
                                 error!(?status, "An invalid request was received from the bot.");
                             }

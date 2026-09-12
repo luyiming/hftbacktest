@@ -139,6 +139,7 @@ fn partial_fills_queue_and_total_quantity_amendments_survive_restore() -> TestRe
             OrderRequest {
                 order_id: 1,
                 price: if side == Side::Buy { 100.0 } else { 101.0 },
+                price_match: PriceMatch::None,
                 qty: 5.0,
                 side,
                 time_in_force: TimeInForce::GTX,
@@ -396,7 +397,10 @@ fn ordinary_build_explicitly_rejects_snapshot_and_fork() -> TestResult {
         original.snapshot(),
         Err(SnapshotError::Unsupported(_))
     ));
-    assert!(matches!(original.fork(), Err(SnapshotError::Unsupported(_))));
+    assert!(matches!(
+        original.fork(),
+        Err(SnapshotError::Unsupported(_))
+    ));
     Ok(())
 }
 

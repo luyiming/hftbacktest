@@ -442,6 +442,43 @@ impl AsRef<str> for TimeInForce {
     }
 }
 
+/// Exchange-side price matching mode.
+///
+/// The exchange resolves the requested book level when it receives a new or modify request, so
+/// the resulting price reflects order entry latency.
+#[cfg_attr(feature = "live", derive(Decode, Encode))]
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+#[repr(u8)]
+pub enum PriceMatch {
+    None = 0,
+    Opponent = 1,
+    Opponent5 = 2,
+    Opponent10 = 3,
+    Opponent20 = 4,
+    Queue = 5,
+    Queue5 = 6,
+    Queue10 = 7,
+    Queue20 = 8,
+    Unsupported = 255,
+}
+
+impl AsRef<str> for PriceMatch {
+    fn as_ref(&self) -> &'static str {
+        match self {
+            PriceMatch::None => "NONE",
+            PriceMatch::Opponent => "OPPONENT",
+            PriceMatch::Opponent5 => "OPPONENT_5",
+            PriceMatch::Opponent10 => "OPPONENT_10",
+            PriceMatch::Opponent20 => "OPPONENT_20",
+            PriceMatch::Queue => "QUEUE",
+            PriceMatch::Queue5 => "QUEUE_5",
+            PriceMatch::Queue10 => "QUEUE_10",
+            PriceMatch::Queue20 => "QUEUE_20",
+            PriceMatch::Unsupported => panic!("PriceMatch::Unsupported"),
+        }
+    }
+}
+
 /// Order type
 #[cfg_attr(feature = "live", derive(Decode, Encode))]
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
@@ -515,6 +552,8 @@ pub struct Order {
     pub taker_price_level_count: u32,
     /// Order price in ticks (`price / tick_size`).
     pub price_tick: i64,
+    /// Exchange-side rule used to resolve `price_tick` when the request arrives.
+    pub price_match: PriceMatch,
     /// The tick size of the asset associated with this order.
     pub tick_size: f64,
     /// The time at which the exchange processes this order, ideally when the matching engine
@@ -532,6 +571,7 @@ pub struct Order {
     /// Request status:
     ///   * [`Status::New`]: Request to open a new order.
     ///   * [`Status::Canceled`]: Request to cancel an opened order.
+    ///   * [`Status::Replaced`]: Request to modify an opened order.
     pub req: Status,
     pub status: Status,
     pub side: Side,
@@ -553,6 +593,7 @@ impl Order {
             qty,
             leaves_qty: qty,
             price_tick,
+            price_match: PriceMatch::None,
             tick_size,
             side,
             time_in_force,
@@ -626,6 +667,7 @@ impl Order {
         self.qty = order.qty;
         self.leaves_qty = order.leaves_qty;
         self.price_tick = order.price_tick;
+        self.price_match = order.price_match;
         self.tick_size = order.tick_size;
         self.side = order.side;
         self.time_in_force = order.time_in_force;
@@ -656,6 +698,7 @@ impl Debug for Order {
             .field("qty", &self.qty)
             .field("leaves_qty", &self.leaves_qty)
             .field("price_tick", &self.price_tick)
+            .field("price_match", &self.price_match)
             .field("tick_size", &self.tick_size)
             .field("side", &self.side)
             .field("time_in_force", &self.time_in_force)
@@ -687,6 +730,7 @@ impl<Context> Decode<Context> for Order {
             cum_exec_value: Decode::decode(decoder)?,
             taker_price_level_count: Decode::decode(decoder)?,
             price_tick: Decode::decode(decoder)?,
+            price_match: Decode::decode(decoder)?,
             tick_size: Decode::decode(decoder)?,
             exch_timestamp: Decode::decode(decoder)?,
             local_timestamp: Decode::decode(decoder)?,
@@ -715,6 +759,7 @@ impl<'de, Context> BorrowDecode<'de, Context> for Order {
             cum_exec_value: Decode::decode(decoder)?,
             taker_price_level_count: Decode::decode(decoder)?,
             price_tick: Decode::decode(decoder)?,
+            price_match: Decode::decode(decoder)?,
             tick_size: Decode::decode(decoder)?,
             exch_timestamp: Decode::decode(decoder)?,
             local_timestamp: Decode::decode(decoder)?,
@@ -742,6 +787,7 @@ impl Encode for Order {
         self.cum_exec_value.encode(encoder)?;
         self.taker_price_level_count.encode(encoder)?;
         self.price_tick.encode(encoder)?;
+        self.price_match.encode(encoder)?;
         self.tick_size.encode(encoder)?;
         self.exch_timestamp.encode(encoder)?;
         self.local_timestamp.encode(encoder)?;
@@ -813,6 +859,8 @@ pub enum BuildError {
 pub struct OrderRequest {
     pub order_id: u64,
     pub price: f64,
+    /// If not [`PriceMatch::None`], the exchange ignores `price` and resolves this mode on arrival.
+    pub price_match: PriceMatch,
     pub qty: f64,
     pub side: Side,
     pub time_in_force: TimeInForce,
@@ -888,6 +936,19 @@ where
         wait: bool,
     ) -> Result<ElapseResult, Self::Error>;
 
+    /// Places a buy order whose price is resolved from exchange depth on arrival.
+    #[allow(clippy::too_many_arguments)]
+    fn submit_buy_order_with_price_match(
+        &mut self,
+        asset_no: usize,
+        order_id: OrderId,
+        qty: f64,
+        time_in_force: TimeInForce,
+        order_type: OrdType,
+        price_match: PriceMatch,
+        wait: bool,
+    ) -> Result<ElapseResult, Self::Error>;
+
     /// Places a sell order.
     ///
     /// * `asset_no` - Asset number at which this command will be executed.
@@ -914,6 +975,19 @@ where
         wait: bool,
     ) -> Result<ElapseResult, Self::Error>;
 
+    /// Places a sell order whose price is resolved from exchange depth on arrival.
+    #[allow(clippy::too_many_arguments)]
+    fn submit_sell_order_with_price_match(
+        &mut self,
+        asset_no: usize,
+        order_id: OrderId,
+        qty: f64,
+        time_in_force: TimeInForce,
+        order_type: OrdType,
+        price_match: PriceMatch,
+        wait: bool,
+    ) -> Result<ElapseResult, Self::Error>;
+
     /// Places an order.
     fn submit_order(
         &mut self,
@@ -936,6 +1010,16 @@ where
         order_id: OrderId,
         price: f64,
         qty: f64,
+        wait: bool,
+    ) -> Result<ElapseResult, Self::Error>;
+
+    /// Modifies an open order using a price resolved from exchange depth on arrival.
+    fn modify_with_price_match(
+        &mut self,
+        asset_no: usize,
+        order_id: OrderId,
+        qty: f64,
+        price_match: PriceMatch,
         wait: bool,
     ) -> Result<ElapseResult, Self::Error>;
 
@@ -1029,6 +1113,8 @@ pub enum ElapseResult {
 
 #[cfg(test)]
 mod tests {
+    use std::mem::{offset_of, size_of};
+
     use crate::{
         prelude::LOCAL_EVENT,
         types::{
@@ -1038,8 +1124,19 @@ mod tests {
             LOCAL_BID_DEPTH_EVENT,
             LOCAL_BID_DEPTH_SNAPSHOT_EVENT,
             LOCAL_BUY_TRADE_EVENT,
+            Order,
         },
     };
+
+    #[test]
+    fn order_c_layout_matches_python_binding() {
+        assert_eq!(size_of::<Order>(), 128);
+        assert_eq!(offset_of!(Order, price_tick), 56);
+        assert_eq!(offset_of!(Order, price_match), 64);
+        assert_eq!(offset_of!(Order, tick_size), 72);
+        assert_eq!(offset_of!(Order, order_id), 96);
+        assert_eq!(offset_of!(Order, status), 123);
+    }
 
     #[test]
     fn test_event_is() {

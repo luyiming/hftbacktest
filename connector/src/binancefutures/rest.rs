@@ -1,5 +1,5 @@
 use chrono::Utc;
-use hftbacktest::types::{OrdType, Side, TimeInForce};
+use hftbacktest::types::{OrdType, PriceMatch, Side, TimeInForce};
 use serde::Deserialize;
 
 use super::msg::{rest, rest::PositionInformationV2};
@@ -20,6 +20,16 @@ pub struct BinanceFuturesClient {
     url: String,
     api_key: String,
     secret: String,
+}
+
+fn append_price(body: &mut String, price: f64, price_prec: usize, price_match: PriceMatch) {
+    if price_match == PriceMatch::None {
+        body.push_str("&price=");
+        body.push_str(&format!("{price:.price_prec$}"));
+    } else {
+        body.push_str("&priceMatch=");
+        body.push_str(price_match.as_ref());
+    }
 }
 
 impl BinanceFuturesClient {
@@ -165,6 +175,7 @@ impl BinanceFuturesClient {
         side: Side,
         price: f64,
         price_prec: usize,
+        price_match: PriceMatch,
         qty: f64,
         order_type: OrdType,
         time_in_force: TimeInForce,
@@ -176,8 +187,7 @@ impl BinanceFuturesClient {
         body.push_str(symbol);
         body.push_str("&side=");
         body.push_str(side.as_ref());
-        body.push_str("&price=");
-        body.push_str(&format!("{price:.price_prec$}"));
+        append_price(&mut body, price, price_prec, price_match);
         body.push_str("&quantity=");
         body.push_str(&format!("{qty:.5}"));
         body.push_str("&type=");
@@ -246,6 +256,7 @@ impl BinanceFuturesClient {
         side: Side,
         price: f64,
         price_prec: usize,
+        price_match: PriceMatch,
         qty: f64,
     ) -> Result<OrderResponse, BinanceFuturesError> {
         let mut body = String::with_capacity(100);
@@ -255,8 +266,7 @@ impl BinanceFuturesClient {
         body.push_str(client_order_id);
         body.push_str("&side=");
         body.push_str(side.as_ref());
-        body.push_str("&price=");
-        body.push_str(&format!("{price:.price_prec$}"));
+        append_price(&mut body, price, price_prec, price_match);
         body.push_str("&quantity=");
         body.push_str(&format!("{qty:.5}"));
 
@@ -345,5 +355,33 @@ impl BinanceFuturesClient {
             .get_noauth("/fapi/v1/depth", format!("symbol={symbol}&limit=1000"))
             .await?;
         Ok(resp)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn price_and_price_match_are_mutually_exclusive() {
+        let mut explicit = String::new();
+        append_price(&mut explicit, 123.456, 2, PriceMatch::None);
+        assert_eq!(explicit, "&price=123.46");
+
+        for price_match in [
+            PriceMatch::Opponent,
+            PriceMatch::Opponent5,
+            PriceMatch::Opponent10,
+            PriceMatch::Opponent20,
+            PriceMatch::Queue,
+            PriceMatch::Queue5,
+            PriceMatch::Queue10,
+            PriceMatch::Queue20,
+        ] {
+            let mut matched = String::new();
+            append_price(&mut matched, 123.456, 2, price_match);
+            assert_eq!(matched, format!("&priceMatch={}", price_match.as_ref()));
+            assert!(!matched.contains("&price="));
+        }
     }
 }

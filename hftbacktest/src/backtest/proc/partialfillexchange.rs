@@ -11,7 +11,7 @@ use crate::{
         assettype::AssetType,
         models::{FeeModel, LatencyModel, QueueModel},
         order::ExchToLocal,
-        proc::Processor,
+        proc::{Processor, price_match::resolve_price_match},
         snapshot::{ProcessorSnapshotFn, SnapshotContext, SnapshotError, SnapshotState},
         state::State,
     },
@@ -406,6 +406,12 @@ where
         if self.orders.borrow().contains_key(&order.order_id) {
             return Err(BacktestError::OrderIdExist);
         }
+        let Some(price_tick) = resolve_price_match(order, &self.depth) else {
+            order.status = Status::Expired;
+            order.exch_timestamp = timestamp;
+            return Ok(());
+        };
+        order.price_tick = price_tick;
 
         if order.side == Side::Buy {
             match order.order_type {
@@ -717,7 +723,8 @@ where
     }
 
     fn ack_modify(&mut self, order: &mut Order, timestamp: i64) -> Result<(), BacktestError> {
-        let requested_price_tick = order.price_tick;
+        let requested_price_tick = resolve_price_match(order, &self.depth);
+        let requested_price_match = order.price_match;
         let requested_qty = order.qty;
         let request_timestamp = order.local_timestamp;
 
@@ -726,6 +733,10 @@ where
             return Ok(());
         }
         order.local_timestamp = request_timestamp;
+        order.price_match = requested_price_match;
+        let Some(requested_price_tick) = requested_price_tick else {
+            return Ok(());
+        };
 
         let crosses_book = order.order_type == OrdType::Limit
             && order.time_in_force == TimeInForce::GTX
@@ -913,7 +924,7 @@ mod tests {
             models::{CommonFees, ConstantLatency, RiskAdverseQueueModel, TradingValueFeeModel},
         },
         depth::BTreeMarketDepth,
-        prelude::{Bot, OrdType, Side, TimeInForce},
+        prelude::{Bot, OrdType, PriceMatch, Side, TimeInForce},
         types::{
             BUY_EVENT, DEPTH_EVENT, EXCH_BUY_TRADE_EVENT, EXCH_EVENT, EXCH_SELL_TRADE_EVENT, Event,
             LOCAL_EVENT, SELL_EVENT, Status,
@@ -921,6 +932,10 @@ mod tests {
     };
 
     fn depth_event(side: Side, px: f64, qty: f64) -> Event {
+        depth_event_at(side, 0, px, qty)
+    }
+
+    fn depth_event_at(side: Side, timestamp: i64, px: f64, qty: f64) -> Event {
         let side_flag = match side {
             Side::Buy => BUY_EVENT,
             Side::Sell => SELL_EVENT,
@@ -928,8 +943,8 @@ mod tests {
         };
         Event {
             ev: DEPTH_EVENT | side_flag | EXCH_EVENT | LOCAL_EVENT,
-            exch_ts: 0,
-            local_ts: 0,
+            exch_ts: timestamp,
+            local_ts: timestamp,
             px,
             qty,
             order_id: 0,
@@ -1348,6 +1363,205 @@ mod tests {
         assert_close(order.cum_exec_value, 300.0);
         assert_close(hbt.position(0), 3.0);
 
+        Ok(())
+    }
+
+    #[test]
+    fn price_match_resolves_all_supported_book_levels() -> Result<(), Box<dyn Error>> {
+        let mut events = Vec::new();
+        for level in 0..20 {
+            events.push(depth_event(Side::Buy, 100.0 - level as f64, 10.0));
+            events.push(depth_event(Side::Sell, 101.0 + level as f64, 10.0));
+        }
+        let cases = [
+            (PriceMatch::Queue, 100.0, 101.0, TimeInForce::GTX),
+            (PriceMatch::Queue5, 96.0, 105.0, TimeInForce::GTX),
+            (PriceMatch::Queue10, 91.0, 110.0, TimeInForce::GTX),
+            (PriceMatch::Queue20, 81.0, 120.0, TimeInForce::GTX),
+            (PriceMatch::Opponent, 101.0, 100.0, TimeInForce::IOC),
+            (PriceMatch::Opponent5, 105.0, 96.0, TimeInForce::IOC),
+            (PriceMatch::Opponent10, 110.0, 91.0, TimeInForce::IOC),
+            (PriceMatch::Opponent20, 120.0, 81.0, TimeInForce::IOC),
+        ];
+
+        for exchange in [
+            ExchangeKind::PartialFillExchange,
+            ExchangeKind::NoPartialFillExchange,
+        ] {
+            for (price_match, buy_price, sell_price, time_in_force) in cases {
+                for (side, expected_price) in [(Side::Buy, buy_price), (Side::Sell, sell_price)] {
+                    let mut hbt = backtest(&events, exchange)?;
+                    hbt.elapse(0)?;
+                    match side {
+                        Side::Buy => hbt.submit_buy_order_with_price_match(
+                            0,
+                            1,
+                            1.0,
+                            time_in_force,
+                            OrdType::Limit,
+                            price_match,
+                            true,
+                        )?,
+                        Side::Sell => hbt.submit_sell_order_with_price_match(
+                            0,
+                            1,
+                            1.0,
+                            time_in_force,
+                            OrdType::Limit,
+                            price_match,
+                            true,
+                        )?,
+                        Side::None | Side::Unsupported => unreachable!(),
+                    };
+                    let order = hbt.orders(0).get(&1).expect("order should exist");
+                    assert_eq!(order.price_match, price_match);
+                    assert_close(order.price(), expected_price);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn queue_create_uses_exchange_book_after_entry_latency() -> Result<(), Box<dyn Error>> {
+        for exchange in [
+            ExchangeKind::PartialFillExchange,
+            ExchangeKind::NoPartialFillExchange,
+        ] {
+            for side in [Side::Buy, Side::Sell] {
+                let events = match side {
+                    Side::Buy => vec![
+                        depth_event(Side::Buy, 100.0, 10.0),
+                        depth_event(Side::Sell, 101.0, 10.0),
+                        depth_event_at(Side::Buy, 5, 100.0, 0.0),
+                        depth_event_at(Side::Buy, 5, 99.0, 10.0),
+                        depth_event_at(Side::Sell, 5, 100.0, 10.0),
+                        empty_event_at(10),
+                    ],
+                    Side::Sell => vec![
+                        depth_event(Side::Buy, 100.0, 10.0),
+                        depth_event(Side::Sell, 101.0, 10.0),
+                        depth_event_at(Side::Sell, 5, 101.0, 0.0),
+                        depth_event_at(Side::Sell, 5, 102.0, 10.0),
+                        depth_event_at(Side::Buy, 5, 101.0, 10.0),
+                        empty_event_at(10),
+                    ],
+                    Side::None | Side::Unsupported => unreachable!(),
+                };
+                let mut explicit = backtest_with_latency(&events, exchange, 6, 0)?;
+                explicit.elapse(0)?;
+                match side {
+                    Side::Buy => explicit.submit_buy_order(
+                        0,
+                        1,
+                        100.0,
+                        1.0,
+                        TimeInForce::GTX,
+                        OrdType::Limit,
+                        true,
+                    )?,
+                    Side::Sell => explicit.submit_sell_order(
+                        0,
+                        1,
+                        101.0,
+                        1.0,
+                        TimeInForce::GTX,
+                        OrdType::Limit,
+                        true,
+                    )?,
+                    Side::None | Side::Unsupported => unreachable!(),
+                };
+                assert_eq!(explicit.orders(0)[&1].status, Status::Expired);
+
+                let mut matched = backtest_with_latency(&events, exchange, 6, 0)?;
+                matched.elapse(0)?;
+                match side {
+                    Side::Buy => matched.submit_buy_order_with_price_match(
+                        0,
+                        1,
+                        1.0,
+                        TimeInForce::GTX,
+                        OrdType::Limit,
+                        PriceMatch::Queue,
+                        true,
+                    )?,
+                    Side::Sell => matched.submit_sell_order_with_price_match(
+                        0,
+                        1,
+                        1.0,
+                        TimeInForce::GTX,
+                        OrdType::Limit,
+                        PriceMatch::Queue,
+                        true,
+                    )?,
+                    Side::None | Side::Unsupported => unreachable!(),
+                };
+                let order = &matched.orders(0)[&1];
+                assert_eq!(order.status, Status::New);
+                assert_close(order.price(), if side == Side::Buy { 99.0 } else { 102.0 });
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn queue_modify_uses_exchange_book_after_entry_latency() -> Result<(), Box<dyn Error>> {
+        for exchange in [
+            ExchangeKind::PartialFillExchange,
+            ExchangeKind::NoPartialFillExchange,
+        ] {
+            for side in [Side::Buy, Side::Sell] {
+                let events = match side {
+                    Side::Buy => vec![
+                        depth_event(Side::Buy, 100.0, 10.0),
+                        depth_event(Side::Sell, 101.0, 10.0),
+                        depth_event_at(Side::Buy, 5, 100.0, 0.0),
+                        depth_event_at(Side::Buy, 5, 99.0, 10.0),
+                        depth_event_at(Side::Sell, 5, 100.0, 10.0),
+                        empty_event_at(12),
+                    ],
+                    Side::Sell => vec![
+                        depth_event(Side::Buy, 100.0, 10.0),
+                        depth_event(Side::Sell, 101.0, 10.0),
+                        depth_event_at(Side::Sell, 5, 101.0, 0.0),
+                        depth_event_at(Side::Sell, 5, 102.0, 10.0),
+                        depth_event_at(Side::Buy, 5, 101.0, 10.0),
+                        empty_event_at(12),
+                    ],
+                    Side::None | Side::Unsupported => unreachable!(),
+                };
+                let mut hbt = backtest_with_latency(&events, exchange, 4, 0)?;
+                hbt.elapse(0)?;
+                match side {
+                    Side::Buy => hbt.submit_buy_order(
+                        0,
+                        1,
+                        98.0,
+                        1.0,
+                        TimeInForce::GTX,
+                        OrdType::Limit,
+                        true,
+                    )?,
+                    Side::Sell => hbt.submit_sell_order(
+                        0,
+                        1,
+                        103.0,
+                        1.0,
+                        TimeInForce::GTX,
+                        OrdType::Limit,
+                        true,
+                    )?,
+                    Side::None | Side::Unsupported => unreachable!(),
+                };
+
+                hbt.modify_with_price_match(0, 1, 1.0, PriceMatch::Queue, true)?;
+
+                let order = &hbt.orders(0)[&1];
+                assert_eq!(order.status, Status::New);
+                assert_eq!(order.price_match, PriceMatch::Queue);
+                assert_close(order.price(), if side == Side::Buy { 99.0 } else { 102.0 });
+            }
+        }
         Ok(())
     }
 }

@@ -252,6 +252,7 @@ impl Connector for BinanceFutures {
                             order.side,
                             order.price_tick as f64 * order.tick_size,
                             get_precision(order.tick_size),
+                            order.price_match,
                             order.qty,
                             order.order_type,
                             order.time_in_force,
@@ -300,6 +301,78 @@ impl Connector for BinanceFutures {
                     );
                     order.req = Status::None;
                     order.status = Status::Expired;
+                    tx.send(PublishEvent::LiveEvent(LiveEvent::Order { symbol, order }))
+                        .unwrap();
+                }
+            }
+        });
+    }
+
+    fn modify(&self, symbol: String, mut order: Order, tx: UnboundedSender<PublishEvent>) {
+        let client = self.client.clone();
+        let order_manager = self.order_manager.clone();
+
+        tokio::spawn(async move {
+            let client_order_id = order_manager
+                .lock()
+                .unwrap()
+                .prepare_modify(&symbol, &order);
+
+            match client_order_id {
+                Some(client_order_id) => {
+                    let result = client
+                        .modify_order(
+                            &client_order_id,
+                            &symbol,
+                            order.side,
+                            order.price_tick as f64 * order.tick_size,
+                            get_precision(order.tick_size),
+                            order.price_match,
+                            order.qty,
+                        )
+                        .await;
+                    match result {
+                        Ok(resp) => {
+                            if let Some(order) = order_manager
+                                .lock()
+                                .unwrap()
+                                .update_from_rest(&client_order_id, &resp)
+                            {
+                                tx.send(PublishEvent::LiveEvent(LiveEvent::Order {
+                                    symbol,
+                                    order,
+                                }))
+                                .unwrap();
+                            }
+                        }
+                        Err(error) => {
+                            if let Some(order) = order_manager
+                                .lock()
+                                .unwrap()
+                                .update_modify_fail(&client_order_id, &error)
+                            {
+                                tx.send(PublishEvent::LiveEvent(LiveEvent::Order {
+                                    symbol,
+                                    order,
+                                }))
+                                .unwrap();
+                            }
+
+                            tx.send(PublishEvent::LiveEvent(LiveEvent::Error(LiveError::with(
+                                ErrorKind::OrderError,
+                                error.into(),
+                            ))))
+                            .unwrap();
+                        }
+                    }
+                }
+                None => {
+                    warn!(
+                        order_id = order.order_id,
+                        "client_order_id corresponding to order_id is not found; \
+                        the modify request will be rejected."
+                    );
+                    order.req = Status::Rejected;
                     tx.send(PublishEvent::LiveEvent(LiveEvent::Order { symbol, order }))
                         .unwrap();
                 }

@@ -607,9 +607,27 @@ hashmapbt_submit_sell_order.argtypes = [
     c_bool
 ]
 
+hashmapbt_submit_buy_order_with_price_match = lib.hashmapbt_submit_buy_order_with_price_match
+hashmapbt_submit_buy_order_with_price_match.restype = c_int64
+hashmapbt_submit_buy_order_with_price_match.argtypes = [
+    c_void_p, c_uint64, c_uint64, c_double, c_uint8, c_uint8, c_uint8, c_bool
+]
+
+hashmapbt_submit_sell_order_with_price_match = lib.hashmapbt_submit_sell_order_with_price_match
+hashmapbt_submit_sell_order_with_price_match.restype = c_int64
+hashmapbt_submit_sell_order_with_price_match.argtypes = [
+    c_void_p, c_uint64, c_uint64, c_double, c_uint8, c_uint8, c_uint8, c_bool
+]
+
 hashmapbt_modify = lib.hashmapbt_modify
 hashmapbt_modify.restype = c_int64
 hashmapbt_modify.argtypes = [c_void_p, c_uint64, c_uint64, c_double, c_double, c_bool]
+
+hashmapbt_modify_with_price_match = lib.hashmapbt_modify_with_price_match
+hashmapbt_modify_with_price_match.restype = c_int64
+hashmapbt_modify_with_price_match.argtypes = [
+    c_void_p, c_uint64, c_uint64, c_double, c_uint8, c_bool
+]
 
 hashmapbt_cancel = lib.hashmapbt_cancel
 hashmapbt_cancel.restype = c_int64
@@ -819,6 +837,36 @@ class HashMapMarketDepthBacktest:
         """
         return hashmapbt_submit_sell_order(self.ptr, asset_no, order_id, price, qty, time_in_force, order_type, wait)
 
+    def submit_buy_order_with_price_match(
+            self,
+            asset_no: uint64,
+            order_id: uint64,
+            qty: float64,
+            time_in_force: uint8,
+            order_type: uint8,
+            price_match: uint8,
+            wait: bool
+    ) -> int64:
+        """Submits a buy order whose price is resolved from exchange depth on arrival."""
+        return hashmapbt_submit_buy_order_with_price_match(
+            self.ptr, asset_no, order_id, qty, time_in_force, order_type, price_match, wait
+        )
+
+    def submit_sell_order_with_price_match(
+            self,
+            asset_no: uint64,
+            order_id: uint64,
+            qty: float64,
+            time_in_force: uint8,
+            order_type: uint8,
+            price_match: uint8,
+            wait: bool
+    ) -> int64:
+        """Submits a sell order whose price is resolved from exchange depth on arrival."""
+        return hashmapbt_submit_sell_order_with_price_match(
+            self.ptr, asset_no, order_id, qty, time_in_force, order_type, price_match, wait
+        )
+
     def modify(self, asset_no: uint64, order_id: uint64, price: float, qty: float, wait: bool) -> int64:
         """
         Modifies the specified order.
@@ -836,6 +884,12 @@ class HashMapMarketDepthBacktest:
             * Otherwise, an error occurred.
         """
         return hashmapbt_modify(self.ptr, asset_no, order_id, price, qty, wait)
+
+    def modify_with_price_match(
+            self, asset_no: uint64, order_id: uint64, qty: float, price_match: uint8, wait: bool
+    ) -> int64:
+        """Modifies an order using a price resolved from exchange depth on arrival."""
+        return hashmapbt_modify_with_price_match(self.ptr, asset_no, order_id, qty, price_match, wait)
 
     def cancel(self, asset_no: uint64, order_id: uint64, wait: bool) -> int64:
         """
@@ -1054,9 +1108,27 @@ roivecbt_submit_sell_order.argtypes = [
     c_bool
 ]
 
+roivecbt_submit_buy_order_with_price_match = lib.roivecbt_submit_buy_order_with_price_match
+roivecbt_submit_buy_order_with_price_match.restype = c_int64
+roivecbt_submit_buy_order_with_price_match.argtypes = [
+    c_void_p, c_uint64, c_uint64, c_double, c_uint8, c_uint8, c_uint8, c_bool
+]
+
+roivecbt_submit_sell_order_with_price_match = lib.roivecbt_submit_sell_order_with_price_match
+roivecbt_submit_sell_order_with_price_match.restype = c_int64
+roivecbt_submit_sell_order_with_price_match.argtypes = [
+    c_void_p, c_uint64, c_uint64, c_double, c_uint8, c_uint8, c_uint8, c_bool
+]
+
 roivecbt_modify = lib.roivecbt_modify
 roivecbt_modify.restype = c_int64
 roivecbt_modify.argtypes = [c_void_p, c_uint64, c_uint64, c_double, c_double, c_bool]
+
+roivecbt_modify_with_price_match = lib.roivecbt_modify_with_price_match
+roivecbt_modify_with_price_match.restype = c_int64
+roivecbt_modify_with_price_match.argtypes = [
+    c_void_p, c_uint64, c_uint64, c_double, c_uint8, c_bool
+]
 
 roivecbt_cancel = lib.roivecbt_cancel
 roivecbt_cancel.restype = c_int64
@@ -1262,6 +1334,36 @@ class ROIVectorMarketDepthBacktest:
         """
         return roivecbt_submit_sell_order(self.ptr, asset_no, order_id, price, qty, time_in_force, order_type, wait)
 
+    def submit_buy_order_with_price_match(
+            self,
+            asset_no: uint64,
+            order_id: uint64,
+            qty: float64,
+            time_in_force: uint8,
+            order_type: uint8,
+            price_match: uint8,
+            wait: bool
+    ) -> int64:
+        """Submits a buy order whose price is resolved from exchange depth on arrival."""
+        return roivecbt_submit_buy_order_with_price_match(
+            self.ptr, asset_no, order_id, qty, time_in_force, order_type, price_match, wait
+        )
+
+    def submit_sell_order_with_price_match(
+            self,
+            asset_no: uint64,
+            order_id: uint64,
+            qty: float64,
+            time_in_force: uint8,
+            order_type: uint8,
+            price_match: uint8,
+            wait: bool
+    ) -> int64:
+        """Submits a sell order whose price is resolved from exchange depth on arrival."""
+        return roivecbt_submit_sell_order_with_price_match(
+            self.ptr, asset_no, order_id, qty, time_in_force, order_type, price_match, wait
+        )
+
     def modify(self, asset_no: uint64, order_id: uint64, price: float, qty: float, wait: bool) -> int64:
         """
         Modifies the specified order.
@@ -1279,6 +1381,12 @@ class ROIVectorMarketDepthBacktest:
             * Otherwise, an error occurred.
         """
         return roivecbt_modify(self.ptr, asset_no, order_id, price, qty, wait)
+
+    def modify_with_price_match(
+            self, asset_no: uint64, order_id: uint64, qty: float, price_match: uint8, wait: bool
+    ) -> int64:
+        """Modifies an order using a price resolved from exchange depth on arrival."""
+        return roivecbt_modify_with_price_match(self.ptr, asset_no, order_id, qty, price_match, wait)
 
     def cancel(self, asset_no: uint64, order_id: uint64, wait: bool) -> int64:
         """

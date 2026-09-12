@@ -3,8 +3,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use hftbacktest::types::{LiveEvent, Order};
+use hftbacktest::types::{LiveEvent, Order, Status};
 use tokio::sync::mpsc::UnboundedSender;
+use tracing::error;
 
 /// A message will be received by the publisher thread and then published to the bots.
 pub enum PublishEvent {
@@ -46,6 +47,18 @@ pub trait Connector {
     /// through the channel using [`PublishEvent`]. The returned error should not be related to the
     /// exchange; instead, it should indicate a connector internal error.
     fn submit(&self, symbol: String, order: Order, tx: UnboundedSender<PublishEvent>);
+
+    /// Modifies an open order. Connectors that do not support modification reject the request.
+    fn modify(&self, symbol: String, mut order: Order, tx: UnboundedSender<PublishEvent>) {
+        error!(
+            ?symbol,
+            order_id = order.order_id,
+            "Order modification is unsupported."
+        );
+        order.req = Status::Rejected;
+        tx.send(PublishEvent::LiveEvent(LiveEvent::Order { symbol, order }))
+            .unwrap();
+    }
 
     /// Cancels an open order. This method should not block, and the response should be returned
     /// through the channel using [`PublishEvent`]. The returned error should not be related to the

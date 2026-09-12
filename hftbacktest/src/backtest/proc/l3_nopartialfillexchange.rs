@@ -4,7 +4,7 @@ use crate::{
         assettype::AssetType,
         models::{FeeModel, L3QueueModel, LatencyModel},
         order::ExchToLocal,
-        proc::Processor,
+        proc::{Processor, price_match::resolve_price_match},
         state::State,
     },
     depth::L3MarketDepth,
@@ -178,6 +178,12 @@ where
         if self.queue_model.contains_backtest_order(order.order_id) {
             return Err(BacktestError::OrderIdExist);
         }
+        let Some(price_tick) = resolve_price_match(order, &self.depth) else {
+            order.status = Status::Expired;
+            order.exch_timestamp = timestamp;
+            return Ok(());
+        };
+        order.price_tick = price_tick;
 
         if order.side == Side::Buy {
             match order.order_type {
@@ -303,29 +309,27 @@ where
         }
     }
 
-    fn ack_modify<const RESET_QUEUE_POS: bool>(
-        &mut self,
-        order: &mut Order,
-        timestamp: i64,
-    ) -> Result<(), BacktestError> {
-        match self
-            .queue_model
-            .modify_backtest_order(order.order_id, order, &self.depth)
-        {
-            Ok(()) => {
-                order.leaves_qty = order.qty;
-                order.exch_timestamp = timestamp;
-                // todo: Status::Replaced or Status::New?
-                order.status = Status::New;
-                Ok(())
-            }
-            Err(BacktestError::OrderNotFound) => {
-                order.req = Status::Rejected;
-                order.exch_timestamp = timestamp;
-                Ok(())
-            }
-            Err(e) => Err(e),
+    fn ack_modify(&mut self, order: &mut Order, timestamp: i64) -> Result<(), BacktestError> {
+        let requested_price_tick = resolve_price_match(order, &self.depth);
+        let requested_price_match = order.price_match;
+        let requested_qty = order.qty;
+        let request_timestamp = order.local_timestamp;
+
+        self.ack_cancel(order, timestamp)?;
+        if order.req == Status::Rejected {
+            return Ok(());
         }
+        order.local_timestamp = request_timestamp;
+        order.price_match = requested_price_match;
+        let Some(requested_price_tick) = requested_price_tick else {
+            return Ok(());
+        };
+
+        order.price_tick = requested_price_tick;
+        order.qty = requested_qty;
+        order.leaves_qty = requested_qty;
+        order.status = Status::New;
+        self.ack_new(order, timestamp)
     }
 }
 
@@ -433,7 +437,7 @@ where
             // Processes a modify order.
             else if order.req == Status::Replaced {
                 order.req = Status::None;
-                self.ack_modify::<false>(&mut order, timestamp)?;
+                self.ack_modify(&mut order, timestamp)?;
             } else {
                 return Err(BacktestError::InvalidOrderRequest);
             }

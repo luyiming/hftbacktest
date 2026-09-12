@@ -59,6 +59,33 @@ LIMIT = 0
 #: MARKET
 MARKET = 1
 
+#: Do not resolve the order price from exchange depth
+NO_PRICE_MATCH = 0
+
+#: Best opposing-side price
+OPPONENT = 1
+
+#: Fifth opposing-side price level
+OPPONENT_5 = 2
+
+#: Tenth opposing-side price level
+OPPONENT_10 = 3
+
+#: Twentieth opposing-side price level
+OPPONENT_20 = 4
+
+#: Best same-side price
+QUEUE = 5
+
+#: Fifth same-side price level
+QUEUE_5 = 6
+
+#: Tenth same-side price level
+QUEUE_10 = 7
+
+#: Twentieth same-side price level
+QUEUE_20 = 8
+
 
 class Order:
     arr: from_dtype(order_dtype)[:]
@@ -111,6 +138,11 @@ class Order:
         Returns the order price in ticks.
         """
         return self.arr[0].price_tick
+
+    @property
+    def price_match(self) -> uint8:
+        """Returns the exchange-side price matching mode."""
+        return self.arr[0].price_match
 
     @property
     def tick_size(self) -> float64:

@@ -6,7 +6,7 @@ use std::{
 use chrono::Utc;
 use rand::Rng;
 use thiserror::Error;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 use crate::{
     depth::{L2MarketDepth, MarketDepth},
@@ -27,6 +27,7 @@ use crate::{
         Order,
         OrderId,
         OrderRequest,
+        PriceMatch,
         Side,
         StateValues,
         Status,
@@ -251,7 +252,9 @@ where
                         if let Some(hook) = self.order_hook.as_mut() {
                             hook(ex_order, &order)?;
                         }
-                        if order.exch_timestamp >= ex_order.exch_timestamp {
+                        if order.req == Status::Rejected {
+                            ex_order.req = Status::None;
+                        } else if order.exch_timestamp >= ex_order.exch_timestamp {
                             if ex_order.status == Status::Canceled
                                 || ex_order.status == Status::Expired
                                 || ex_order.status == Status::Filled
@@ -362,12 +365,23 @@ where
         asset_no: usize,
         order_id: u64,
         price: f64,
+        price_match: PriceMatch,
         qty: f64,
         time_in_force: TimeInForce,
         order_type: OrdType,
         wait: bool,
         side: Side,
     ) -> Result<ElapseResult, BotError> {
+        if price_match != PriceMatch::None && order_type != OrdType::Limit {
+            return Err(BotError::Custom(
+                "price matching requires a limit order".to_string(),
+            ));
+        }
+        if price_match == PriceMatch::Unsupported {
+            return Err(BotError::Custom(
+                "PriceMatch::Unsupported cannot be submitted".to_string(),
+            ));
+        }
         let instrument = self
             .instruments
             .get_mut(asset_no)
@@ -380,6 +394,7 @@ where
         let order = Order {
             order_id,
             price_tick: (price / tick_size).round() as i64,
+            price_match,
             qty,
             leaves_qty: qty,
             tick_size,
@@ -404,6 +419,70 @@ where
 
         self.channel
             .send(self.id, asset_no, LiveRequest::Order { symbol, order })?;
+
+        if wait {
+            // fixme: timeout should be specified by the argument.
+            return self.wait_order_response(asset_no, order_id, 60_000_000_000);
+        }
+        Ok(ElapseResult::Ok)
+    }
+
+    fn modify_order(
+        &mut self,
+        asset_no: usize,
+        order_id: OrderId,
+        price: Option<f64>,
+        qty: f64,
+        price_match: PriceMatch,
+        wait: bool,
+    ) -> Result<ElapseResult, BotError> {
+        if price.is_none() && price_match == PriceMatch::None {
+            return Err(BotError::Custom(
+                "PriceMatch::None requires an explicit price".to_string(),
+            ));
+        }
+        if price_match == PriceMatch::Unsupported {
+            return Err(BotError::Custom(
+                "PriceMatch::Unsupported cannot be submitted".to_string(),
+            ));
+        }
+
+        let instrument = self
+            .instruments
+            .get_mut(asset_no)
+            .ok_or(BotError::InstrumentNotFound)?;
+        let symbol = instrument.symbol.clone();
+        let order = instrument
+            .orders
+            .get_mut(&order_id)
+            .ok_or(BotError::OrderNotFound)?;
+        if !order.cancellable() {
+            return Err(BotError::InvalidOrderStatus);
+        }
+        if price_match != PriceMatch::None && order.order_type != OrdType::Limit {
+            return Err(BotError::Custom(
+                "price matching requires a limit order".to_string(),
+            ));
+        }
+
+        order.req = Status::Replaced;
+        order.local_timestamp = Utc::now().timestamp_nanos_opt().unwrap();
+
+        let mut request = order.clone();
+        if let Some(price) = price {
+            request.price_tick = (price / instrument.tick_size).round() as i64;
+        }
+        request.price_match = price_match;
+        request.qty = qty;
+
+        self.channel.send(
+            self.id,
+            asset_no,
+            LiveRequest::Order {
+                symbol,
+                order: request,
+            },
+        )?;
 
         if wait {
             // fixme: timeout should be specified by the argument.
@@ -497,6 +576,36 @@ where
             asset_no,
             order_id,
             price,
+            PriceMatch::None,
+            qty,
+            time_in_force,
+            order_type,
+            wait,
+            Side::Buy,
+        )
+    }
+
+    #[inline]
+    fn submit_buy_order_with_price_match(
+        &mut self,
+        asset_no: usize,
+        order_id: OrderId,
+        qty: f64,
+        time_in_force: TimeInForce,
+        order_type: OrdType,
+        price_match: PriceMatch,
+        wait: bool,
+    ) -> Result<ElapseResult, Self::Error> {
+        if matches!(price_match, PriceMatch::None | PriceMatch::Unsupported) {
+            return Err(BotError::Custom(
+                "a concrete price-match mode is required".to_string(),
+            ));
+        }
+        self.submit_order(
+            asset_no,
+            order_id,
+            0.0,
+            price_match,
             qty,
             time_in_force,
             order_type,
@@ -520,6 +629,36 @@ where
             asset_no,
             order_id,
             price,
+            PriceMatch::None,
+            qty,
+            time_in_force,
+            order_type,
+            wait,
+            Side::Sell,
+        )
+    }
+
+    #[inline]
+    fn submit_sell_order_with_price_match(
+        &mut self,
+        asset_no: usize,
+        order_id: OrderId,
+        qty: f64,
+        time_in_force: TimeInForce,
+        order_type: OrdType,
+        price_match: PriceMatch,
+        wait: bool,
+    ) -> Result<ElapseResult, Self::Error> {
+        if matches!(price_match, PriceMatch::None | PriceMatch::Unsupported) {
+            return Err(BotError::Custom(
+                "a concrete price-match mode is required".to_string(),
+            ));
+        }
+        self.submit_order(
+            asset_no,
+            order_id,
+            0.0,
+            price_match,
             qty,
             time_in_force,
             order_type,
@@ -538,6 +677,7 @@ where
             asset_no,
             order.order_id,
             order.price,
+            order.price_match,
             order.qty,
             order.time_in_force,
             order.order_type,
@@ -555,7 +695,19 @@ where
         qty: f64,
         wait: bool,
     ) -> Result<ElapseResult, Self::Error> {
-        todo!();
+        self.modify_order(asset_no, order_id, Some(price), qty, PriceMatch::None, wait)
+    }
+
+    #[inline]
+    fn modify_with_price_match(
+        &mut self,
+        asset_no: usize,
+        order_id: OrderId,
+        qty: f64,
+        price_match: PriceMatch,
+        wait: bool,
+    ) -> Result<ElapseResult, Self::Error> {
+        self.modify_order(asset_no, order_id, None, qty, price_match, wait)
     }
 
     #[inline]

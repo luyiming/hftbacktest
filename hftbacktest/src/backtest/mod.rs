@@ -30,6 +30,7 @@ use crate::{
         Order,
         OrderId,
         OrderRequest,
+        PriceMatch,
         Side,
         StateValues,
         TimeInForce,
@@ -126,6 +127,7 @@ impl<L, E, D: NpyDTyped + Clone> Asset<L, E, D> {
 }
 
 /// Exchange model kind.
+#[derive(Clone, Copy)]
 pub enum ExchangeKind {
     /// Uses [NoPartialFillExchange](`NoPartialFillExchange`).
     NoPartialFillExchange,
@@ -977,6 +979,42 @@ where
             order_id,
             Side::Buy,
             price,
+            PriceMatch::None,
+            qty,
+            order_type,
+            time_in_force,
+            self.cur_ts,
+        )?;
+
+        if wait {
+            return self.goto::<false>(
+                UNTIL_END_OF_DATA,
+                WaitOrderResponse::Specified { asset_no, order_id },
+            );
+        }
+        Ok(ElapseResult::Ok)
+    }
+
+    #[inline]
+    fn submit_buy_order_with_price_match(
+        &mut self,
+        asset_no: usize,
+        order_id: OrderId,
+        qty: f64,
+        time_in_force: TimeInForce,
+        order_type: OrdType,
+        price_match: PriceMatch,
+        wait: bool,
+    ) -> Result<ElapseResult, Self::Error> {
+        if matches!(price_match, PriceMatch::None | PriceMatch::Unsupported) {
+            return Err(BacktestError::InvalidOrderRequest);
+        }
+        let local = self.local.get_mut(asset_no).unwrap();
+        local.submit_order(
+            order_id,
+            Side::Buy,
+            0.0,
+            price_match,
             qty,
             order_type,
             time_in_force,
@@ -1008,6 +1046,42 @@ where
             order_id,
             Side::Sell,
             price,
+            PriceMatch::None,
+            qty,
+            order_type,
+            time_in_force,
+            self.cur_ts,
+        )?;
+
+        if wait {
+            return self.goto::<false>(
+                UNTIL_END_OF_DATA,
+                WaitOrderResponse::Specified { asset_no, order_id },
+            );
+        }
+        Ok(ElapseResult::Ok)
+    }
+
+    #[inline]
+    fn submit_sell_order_with_price_match(
+        &mut self,
+        asset_no: usize,
+        order_id: OrderId,
+        qty: f64,
+        time_in_force: TimeInForce,
+        order_type: OrdType,
+        price_match: PriceMatch,
+        wait: bool,
+    ) -> Result<ElapseResult, Self::Error> {
+        if matches!(price_match, PriceMatch::None | PriceMatch::Unsupported) {
+            return Err(BacktestError::InvalidOrderRequest);
+        }
+        let local = self.local.get_mut(asset_no).unwrap();
+        local.submit_order(
+            order_id,
+            Side::Sell,
+            0.0,
+            price_match,
             qty,
             order_type,
             time_in_force,
@@ -1034,6 +1108,7 @@ where
             order.order_id,
             order.side,
             order.price,
+            order.price_match,
             order.qty,
             order.order_type,
             order.time_in_force,
@@ -1062,7 +1137,31 @@ where
         wait: bool,
     ) -> Result<ElapseResult, Self::Error> {
         let local = self.local.get_mut(asset_no).unwrap();
-        local.modify(order_id, price, qty, self.cur_ts)?;
+        local.modify(order_id, price, PriceMatch::None, qty, self.cur_ts)?;
+
+        if wait {
+            return self.goto::<false>(
+                UNTIL_END_OF_DATA,
+                WaitOrderResponse::Specified { asset_no, order_id },
+            );
+        }
+        Ok(ElapseResult::Ok)
+    }
+
+    #[inline]
+    fn modify_with_price_match(
+        &mut self,
+        asset_no: usize,
+        order_id: OrderId,
+        qty: f64,
+        price_match: PriceMatch,
+        wait: bool,
+    ) -> Result<ElapseResult, Self::Error> {
+        if matches!(price_match, PriceMatch::None | PriceMatch::Unsupported) {
+            return Err(BacktestError::InvalidOrderRequest);
+        }
+        let local = self.local.get_mut(asset_no).unwrap();
+        local.modify(order_id, 0.0, price_match, qty, self.cur_ts)?;
 
         if wait {
             return self.goto::<false>(

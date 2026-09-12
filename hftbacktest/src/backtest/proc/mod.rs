@@ -1,6 +1,7 @@
 mod local;
 mod nopartialfillexchange;
 mod partialfillexchange;
+mod price_match;
 
 use std::collections::HashMap;
 
@@ -21,7 +22,7 @@ use crate::{
         snapshot::{SnapshotContext, SnapshotError},
     },
     depth::MarketDepth,
-    prelude::{Event, OrdType, Order, OrderId, Side, StateValues, TimeInForce},
+    prelude::{Event, OrdType, Order, OrderId, PriceMatch, Side, StateValues, TimeInForce},
 };
 
 /// Provides local-specific interaction.
@@ -43,6 +44,7 @@ where
     /// * `order_id` - The unique order ID; there should not be any existing order with the same ID
     ///   on both local and exchange sides.
     /// * `price` - Order price.
+    /// * `price_match` - Exchange-side price matching mode. A non-`None` mode supersedes `price`.
     /// * `qty` - Quantity to buy.
     /// * `order_type` - Available [`OrdType`] options vary depending on the exchange model. See to
     ///   the exchange model for details.
@@ -55,6 +57,7 @@ where
         order_id: OrderId,
         side: Side,
         price: f64,
+        price_match: PriceMatch,
         qty: f64,
         order_type: OrdType,
         time_in_force: TimeInForce,
@@ -65,6 +68,7 @@ where
     ///
     /// * `order_id` - Order ID to modify.
     /// * `price` - Order price.
+    /// * `price_match` - Exchange-side price matching mode. A non-`None` mode supersedes `price`.
     /// * `qty` - New total order quantity for L2 backtesting, including the cumulative executed
     ///   quantity.
     /// * `current_timestamp` - The current backtesting timestamp.
@@ -72,6 +76,7 @@ where
         &mut self,
         order_id: OrderId,
         price: f64,
+        price_match: PriceMatch,
         qty: f64,
         current_timestamp: i64,
     ) -> Result<(), BacktestError>;

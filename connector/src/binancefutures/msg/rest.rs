@@ -1,7 +1,10 @@
-use hftbacktest::types::{OrdType, Side, Status, TimeInForce};
+use hftbacktest::types::{OrdType, PriceMatch, Side, Status, TimeInForce};
 use serde::Deserialize;
 
-use super::{from_str_to_side, from_str_to_status, from_str_to_tif, from_str_to_type};
+use super::{
+    from_str_to_price_match, from_str_to_side, from_str_to_status, from_str_to_tif,
+    from_str_to_type,
+};
 use crate::utils::{from_str_to_f64, from_str_to_f64_opt, to_lowercase};
 
 #[derive(Deserialize, Debug)]
@@ -89,7 +92,8 @@ pub struct OrderResponse {
     #[serde(rename = "priceProtect")]
     pub price_protect: bool,
     #[serde(rename = "priceMatch")]
-    pub price_match: String,
+    #[serde(deserialize_with = "from_str_to_price_match")]
+    pub price_match: PriceMatch,
     #[serde(rename = "selfTradePreventionMode")]
     pub self_trade_prevention_mode: String,
     #[serde(rename = "goodTillDate")]

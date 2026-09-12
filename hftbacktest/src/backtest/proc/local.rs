@@ -6,7 +6,7 @@ use crate::{
         assettype::AssetType,
         models::{FeeModel, LatencyModel},
         order::LocalToExch,
-        proc::{LocalProcessor, Processor},
+        proc::{LocalProcessor, Processor, price_match::validate_price_match},
         snapshot::{LocalSnapshotFn, SnapshotContext, SnapshotError, SnapshotState},
         state::State,
     },
@@ -25,6 +25,7 @@ use crate::{
         OrdType,
         Order,
         OrderId,
+        PriceMatch,
         Side,
         StateValues,
         Status,
@@ -193,11 +194,13 @@ where
         order_id: OrderId,
         side: Side,
         price: f64,
+        price_match: PriceMatch,
         qty: f64,
         order_type: OrdType,
         time_in_force: TimeInForce,
         current_timestamp: i64,
     ) -> Result<(), BacktestError> {
+        validate_price_match(order_type, price_match)?;
         if self.orders.contains_key(&order_id) {
             return Err(BacktestError::OrderIdExist);
         }
@@ -212,6 +215,7 @@ where
             order_type,
             time_in_force,
         );
+        order.price_match = price_match;
         order.req = Status::New;
         order.local_timestamp = current_timestamp;
         self.orders.insert(order.order_id, order.clone());
@@ -227,6 +231,7 @@ where
         &mut self,
         order_id: OrderId,
         price: f64,
+        price_match: PriceMatch,
         qty: f64,
         current_timestamp: i64,
     ) -> Result<(), BacktestError> {
@@ -238,12 +243,16 @@ where
         if order.req != Status::None {
             return Err(BacktestError::OrderRequestInProcess);
         }
+        validate_price_match(order.order_type, price_match)?;
 
         let orig_price_tick = order.price_tick;
+        let orig_price_match = order.price_match;
         let orig_qty = order.qty;
 
-        let price_tick = (price / self.depth.tick_size()).round() as i64;
-        order.price_tick = price_tick;
+        if price_match == PriceMatch::None {
+            order.price_tick = (price / self.depth.tick_size()).round() as i64;
+        }
+        order.price_match = price_match;
         order.qty = qty;
 
         order.req = Status::Replaced;
@@ -252,6 +261,7 @@ where
         self.order_l2e.request(order.clone(), |order| {
             order.req = Status::Rejected;
             order.price_tick = orig_price_tick;
+            order.price_match = orig_price_match;
             order.qty = orig_qty;
         });
 

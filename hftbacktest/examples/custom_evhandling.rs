@@ -21,7 +21,7 @@ use hftbacktest::{
         state::State,
     },
     depth::{HashMapMarketDepth, L2MarketDepth, MarketDepth},
-    prelude::{Bot, Event, OrdType, Order, OrderId, Side, StateValues, TimeInForce},
+    prelude::{Bot, Event, OrdType, Order, OrderId, PriceMatch, Side, StateValues, TimeInForce},
 };
 
 /// Handling tick events and order response events through the event handler approach requires
@@ -50,6 +50,7 @@ where
         order_id: OrderId,
         side: Side,
         price: f64,
+        price_match: PriceMatch,
         qty: f64,
         order_type: OrdType,
         time_in_force: TimeInForce,
@@ -59,6 +60,7 @@ where
             order_id,
             side,
             price,
+            price_match,
             qty,
             order_type,
             time_in_force,
@@ -70,10 +72,12 @@ where
         &mut self,
         order_id: OrderId,
         price: f64,
+        price_match: PriceMatch,
         qty: f64,
         current_timestamp: i64,
     ) -> Result<(), BacktestError> {
-        self.local.modify(order_id, price, qty, current_timestamp)
+        self.local
+            .modify(order_id, price, price_match, qty, current_timestamp)
     }
 
     fn cancel(&mut self, order_id: OrderId, current_timestamp: i64) -> Result<(), BacktestError> {

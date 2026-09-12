@@ -6,7 +6,7 @@ use hftbacktest::{
     backtest::{Backtest, BacktestError},
     depth::{HashMapMarketDepth, ROIVectorMarketDepth},
     prelude::{Bot, ElapseResult, Event, Order, StateValues},
-    types::{OrdType, TimeInForce},
+    types::{OrdType, PriceMatch, TimeInForce},
 };
 
 type HashMapMarketDepthBacktest = Backtest<HashMapMarketDepth>;
@@ -28,6 +28,21 @@ fn handle_result(result: Result<ElapseResult, BacktestError>) -> i64 {
             println!("BacktestError::DataError: {error:?}");
             100
         },
+    }
+}
+
+fn price_match_from_u8(value: u8) -> PriceMatch {
+    match value {
+        0 => PriceMatch::None,
+        1 => PriceMatch::Opponent,
+        2 => PriceMatch::Opponent5,
+        3 => PriceMatch::Opponent10,
+        4 => PriceMatch::Opponent20,
+        5 => PriceMatch::Queue,
+        6 => PriceMatch::Queue5,
+        7 => PriceMatch::Queue10,
+        8 => PriceMatch::Queue20,
+        _ => PriceMatch::Unsupported,
     }
 }
 
@@ -175,6 +190,52 @@ pub extern "C" fn hashmapbt_submit_sell_order(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn hashmapbt_submit_buy_order_with_price_match(
+    hbt_ptr: *mut HashMapMarketDepthBacktest,
+    asset_no: usize,
+    order_id: u64,
+    qty: f64,
+    time_in_force: u8,
+    order_type: u8,
+    price_match: u8,
+    wait: bool,
+) -> i64 {
+    let hbt = unsafe { &mut *hbt_ptr };
+    handle_result(hbt.submit_buy_order_with_price_match(
+        asset_no,
+        order_id,
+        qty,
+        unsafe { mem::transmute::<u8, TimeInForce>(time_in_force) },
+        unsafe { mem::transmute::<u8, OrdType>(order_type) },
+        price_match_from_u8(price_match),
+        wait,
+    ))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn hashmapbt_submit_sell_order_with_price_match(
+    hbt_ptr: *mut HashMapMarketDepthBacktest,
+    asset_no: usize,
+    order_id: u64,
+    qty: f64,
+    time_in_force: u8,
+    order_type: u8,
+    price_match: u8,
+    wait: bool,
+) -> i64 {
+    let hbt = unsafe { &mut *hbt_ptr };
+    handle_result(hbt.submit_sell_order_with_price_match(
+        asset_no,
+        order_id,
+        qty,
+        unsafe { mem::transmute::<u8, TimeInForce>(time_in_force) },
+        unsafe { mem::transmute::<u8, OrdType>(order_type) },
+        price_match_from_u8(price_match),
+        wait,
+    ))
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn hashmapbt_modify(
     hbt_ptr: *mut HashMapMarketDepthBacktest,
     asset_no: usize,
@@ -185,6 +246,25 @@ pub extern "C" fn hashmapbt_modify(
 ) -> i64 {
     let hbt = unsafe { &mut *hbt_ptr };
     handle_result(hbt.modify(asset_no, order_id, price, qty, wait))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn hashmapbt_modify_with_price_match(
+    hbt_ptr: *mut HashMapMarketDepthBacktest,
+    asset_no: usize,
+    order_id: u64,
+    qty: f64,
+    price_match: u8,
+    wait: bool,
+) -> i64 {
+    let hbt = unsafe { &mut *hbt_ptr };
+    handle_result(hbt.modify_with_price_match(
+        asset_no,
+        order_id,
+        qty,
+        price_match_from_u8(price_match),
+        wait,
+    ))
 }
 
 #[unsafe(no_mangle)]
@@ -437,6 +517,52 @@ pub extern "C" fn roivecbt_submit_sell_order(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn roivecbt_submit_buy_order_with_price_match(
+    hbt_ptr: *mut ROIVectorMarketDepthBacktest,
+    asset_no: usize,
+    order_id: u64,
+    qty: f64,
+    time_in_force: u8,
+    order_type: u8,
+    price_match: u8,
+    wait: bool,
+) -> i64 {
+    let hbt = unsafe { &mut *hbt_ptr };
+    handle_result(hbt.submit_buy_order_with_price_match(
+        asset_no,
+        order_id,
+        qty,
+        unsafe { mem::transmute::<u8, TimeInForce>(time_in_force) },
+        unsafe { mem::transmute::<u8, OrdType>(order_type) },
+        price_match_from_u8(price_match),
+        wait,
+    ))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn roivecbt_submit_sell_order_with_price_match(
+    hbt_ptr: *mut ROIVectorMarketDepthBacktest,
+    asset_no: usize,
+    order_id: u64,
+    qty: f64,
+    time_in_force: u8,
+    order_type: u8,
+    price_match: u8,
+    wait: bool,
+) -> i64 {
+    let hbt = unsafe { &mut *hbt_ptr };
+    handle_result(hbt.submit_sell_order_with_price_match(
+        asset_no,
+        order_id,
+        qty,
+        unsafe { mem::transmute::<u8, TimeInForce>(time_in_force) },
+        unsafe { mem::transmute::<u8, OrdType>(order_type) },
+        price_match_from_u8(price_match),
+        wait,
+    ))
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn roivecbt_modify(
     hbt_ptr: *mut ROIVectorMarketDepthBacktest,
     asset_no: usize,
@@ -447,6 +573,25 @@ pub extern "C" fn roivecbt_modify(
 ) -> i64 {
     let hbt = unsafe { &mut *hbt_ptr };
     handle_result(hbt.modify(asset_no, order_id, price, qty, wait))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn roivecbt_modify_with_price_match(
+    hbt_ptr: *mut ROIVectorMarketDepthBacktest,
+    asset_no: usize,
+    order_id: u64,
+    qty: f64,
+    price_match: u8,
+    wait: bool,
+) -> i64 {
+    let hbt = unsafe { &mut *hbt_ptr };
+    handle_result(hbt.modify_with_price_match(
+        asset_no,
+        order_id,
+        qty,
+        price_match_from_u8(price_match),
+        wait,
+    ))
 }
 
 #[unsafe(no_mangle)]
