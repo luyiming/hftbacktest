@@ -6,8 +6,7 @@ from numpy.typing import NDArray
 from ._hftbacktest import (
     BacktestAsset as BacktestAsset_,
     build_hashmap_backtest,
-    build_roivec_backtest,
-    LiveInstrument
+    build_roivec_backtest
 )
 from .binding import (
     HashMapMarketDepthBacktest_,
@@ -48,29 +47,10 @@ from .types import (
     BUY_EVENT,
     SELL_EVENT
 )
-try:
-    from ._hftbacktest import (
-        build_hashmap_livebot,
-        build_roivec_livebot
-    )
-    from .binding import (
-        HashMapMarketDepthLiveBot_,
-        HashMapMarketDepthLiveBot as HashMapMarketDepthLiveBot_TypeHint,
-        ROIVectorMarketDepthLiveBot_,
-        ROIVectorMarketDepthLiveBot as ROIVectorMarketDepthLiveBot_TypeHint,
-    )
-    LIVE_FEATURE = True
-except:
-    LIVE_FEATURE = False
-
 __all__ = (
     'BacktestAsset',
     'HashMapMarketDepthBacktest',
     'ROIVectorMarketDepthBacktest',
-
-    'LiveInstrument',
-    'HashMapMarketDepthLiveBot',
-    'ROIVectorMarketDepthLiveBot',
 
     'ALL_ASSETS',
 
@@ -216,20 +196,3 @@ def ROIVectorMarketDepthBacktest(
     """
     ptr = build_roivec_backtest(assets)
     return ROIVectorMarketDepthBacktest_(ptr)
-
-
-if LIVE_FEATURE:
-    def ROIVectorMarketDepthLiveBot(
-            assets: List[LiveInstrument]
-    ) -> ROIVectorMarketDepthLiveBot_TypeHint:
-        """
-        Constructs an instance of `ROIVectorMarketDepthLiveBot`.
-
-        Args:
-            assets: A list of live instruments constructed using :class:`LiveInstrument`.
-
-        Returns:
-            A jit`ed `ROIVectorMarketDepthLiveBot` that can be used in an ``njit`` function.
-        """
-        ptr = build_roivec_livebot(assets)
-        return ROIVectorMarketDepthLiveBot_(ptr)

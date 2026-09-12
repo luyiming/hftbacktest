@@ -1,8 +1,8 @@
 Data
 ====
 
-Please see `Data Collector <https://github.com/nkaz001/hftbacktest/tree/master/collector>`_ or
-:doc:`Data Preparation <tutorials/Data Preparation>` regarding collecting and converting the feed data.
+Please see :doc:`Data Preparation <tutorials/Data Preparation>` regarding collecting and converting
+feed data.
 
 Format
 ------

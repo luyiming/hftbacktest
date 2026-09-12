@@ -4,148 +4,11 @@ use std::{
     fmt::{Debug, Formatter},
 };
 
-use anyhow::Error;
-#[cfg(feature = "live")]
-use bincode::{
-    BorrowDecode, Decode, Encode,
-    de::{BorrowDecoder, Decoder},
-    enc::Encoder,
-    error::{DecodeError, EncodeError},
-};
 use dyn_clone::DynClone;
 use hftbacktest_derive::NpyDTyped;
 use thiserror::Error;
 
 use crate::{backtest::data::POD, depth::MarketDepth};
-
-#[cfg_attr(feature = "live", derive(Decode, Encode))]
-#[derive(Clone, Debug)]
-pub enum Value {
-    String(String),
-    Int(i64),
-    Float(f64),
-    Bool(bool),
-    List(Vec<Value>),
-    Map(HashMap<String, Value>),
-    Empty,
-}
-
-impl Value {
-    pub fn get_str(&self) -> Option<&str> {
-        if let Value::String(val) = self {
-            Some(val.as_str())
-        } else {
-            None
-        }
-    }
-
-    pub fn get_int(&self) -> Option<i64> {
-        if let Value::Int(val) = self {
-            Some(*val)
-        } else {
-            None
-        }
-    }
-
-    pub fn get_float(&self) -> Option<f64> {
-        if let Value::Float(val) = self {
-            Some(*val)
-        } else {
-            None
-        }
-    }
-
-    pub fn get_bool(&self) -> Option<bool> {
-        if let Value::Bool(val) = self {
-            Some(*val)
-        } else {
-            None
-        }
-    }
-
-    pub fn get_list(&self) -> Option<&Vec<Value>> {
-        if let Value::List(val) = self {
-            Some(val)
-        } else {
-            None
-        }
-    }
-
-    pub fn get_map(&self) -> Option<&HashMap<String, Value>> {
-        if let Value::Map(val) = self {
-            Some(val)
-        } else {
-            None
-        }
-    }
-}
-
-impl From<anyhow::Error> for Value {
-    fn from(value: Error) -> Self {
-        // todo!: improve this to deliver detailed error information.
-        Value::String(value.to_string())
-    }
-}
-
-/// Error conveyed through [`LiveEvent`].
-#[cfg_attr(feature = "live", derive(Decode, Encode))]
-#[derive(Clone, Debug)]
-pub struct LiveError {
-    pub kind: ErrorKind,
-    pub value: Value,
-}
-
-impl LiveError {
-    /// Constructs an instance of `LiveError`.
-    pub fn new(kind: ErrorKind) -> LiveError {
-        Self {
-            kind,
-            value: Value::Empty,
-        }
-    }
-
-    /// Constructs an instance of `LiveError` with a value that contains detailed error information.
-    pub fn with(kind: ErrorKind, value: Value) -> LiveError {
-        Self { kind, value }
-    }
-
-    /// Returns a reference to the value that contains detailed error information.
-    pub fn value(&self) -> &Value {
-        &self.value
-    }
-}
-
-/// Error type assigned to [`LiveError`].
-#[cfg_attr(feature = "live", derive(Decode, Encode))]
-#[derive(Clone, Copy, Eq, PartialEq, Debug)]
-pub enum ErrorKind {
-    ConnectionInterrupted,
-    CriticalConnectionError,
-    OrderError,
-    Custom(i64),
-}
-
-/// Events occurring in a live bot sent by a [`Connector`](`crate::connector::Connector`).
-#[cfg_attr(feature = "live", derive(Decode, Encode))]
-#[derive(Clone, Debug)]
-pub enum LiveEvent {
-    BatchStart,
-    BatchEnd,
-    Feed {
-        symbol: String,
-        event: Event,
-    },
-    Order {
-        symbol: String,
-        order: Order,
-    },
-    Position {
-        symbol: String,
-        qty: f64,
-        exch_ts: i64,
-    },
-    Error(LiveError),
-}
 
 /// Indicates a buy, with specific meaning that can vary depending on the situation. For example,
 /// when combined with a depth event, it means a bid-side event, while when combined with a trade
@@ -313,7 +176,6 @@ pub enum WaitOrderResponse {
 
 /// Feed event data.
 #[repr(C, align(64))]
-#[cfg_attr(feature = "live", derive(Decode, Encode))]
 #[derive(Clone, PartialEq, Debug, NpyDTyped)]
 pub struct Event {
     /// Event flag
@@ -355,7 +217,6 @@ impl Event {
 
 /// Represents a side, which can refer to either the side of an order or the initiator's side in a
 /// trade event, with the meaning varying depending on the context.
-#[cfg_attr(feature = "live", derive(Decode, Encode))]
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 #[repr(i8)]
 pub enum Side {
@@ -367,8 +228,7 @@ pub enum Side {
     Sell = -1,
     /// No side provided.
     None = 0,
-    /// This occurs when the [`Connector`](`crate::connector::Connector`) receives a side value that
-    /// does not have a corresponding enum value.
+    /// No supported side corresponds to the provided value.
     Unsupported = 127,
 }
 
@@ -395,7 +255,6 @@ impl AsRef<str> for Side {
 }
 
 /// Order status
-#[cfg_attr(feature = "live", derive(Decode, Encode))]
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 #[repr(u8)]
 pub enum Status {
@@ -407,13 +266,11 @@ pub enum Status {
     PartiallyFilled = 5,
     Rejected = 6,
     Replaced = 7,
-    /// This occurs when the [`Connector`](`crate::connector::Connector`) receives an order status
-    /// value that does not have a corresponding enum value.
+    /// No supported order status corresponds to the provided value.
     Unsupported = 255,
 }
 
 /// Time In Force
-#[cfg_attr(feature = "live", derive(Decode, Encode))]
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 #[repr(u8)]
 pub enum TimeInForce {
@@ -425,8 +282,7 @@ pub enum TimeInForce {
     FOK = 2,
     /// Immediate or Cancel
     IOC = 3,
-    /// This occurs when the [`Connector`](`crate::connector::Connector`) receives a time-in-force
-    /// value that does not have a corresponding enum value.
+    /// No supported time-in-force corresponds to the provided value.
     Unsupported = 255,
 }
 
@@ -446,7 +302,6 @@ impl AsRef<str> for TimeInForce {
 ///
 /// The exchange resolves the requested book level when it receives a new or modify request, so
 /// the resulting price reflects order entry latency.
-#[cfg_attr(feature = "live", derive(Decode, Encode))]
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 #[repr(u8)]
 pub enum PriceMatch {
@@ -480,7 +335,6 @@ impl AsRef<str> for PriceMatch {
 }
 
 /// Order type
-#[cfg_attr(feature = "live", derive(Decode, Encode))]
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 #[repr(u8)]
 pub enum OrdType {
@@ -563,7 +417,7 @@ pub struct Order {
     pub local_timestamp: i64,
     pub order_id: u64,
     /// Additional data used for [`QueueModel`](`crate::backtest::models::QueueModel`).
-    /// This is only available in backtesting, and the type `Q` is set to `()` in a live bot.
+    /// This is only available in backtesting.
     pub q: Box<dyn AnyClone + Send>,
     /// Whether the order is executed as a maker, only available when this order is executed.
     pub maker: bool,
@@ -648,8 +502,7 @@ impl Order {
         self.req != Status::None
     }
 
-    /// Updates this order with the given order. This is used only by the processor in backtesting
-    /// or by a bot in live trading.
+    /// Updates this order with the response produced by a backtesting processor.
     pub fn update(&mut self, order: &Order) {
         //assert!(order.exch_timestamp >= self.exch_timestamp);
         if order.exch_timestamp < self.exch_timestamp {
@@ -718,124 +571,17 @@ impl Debug for Order {
     }
 }
 
-#[cfg(feature = "live")]
-impl<Context> Decode<Context> for Order {
-    fn decode<D: Decoder>(decoder: &mut D) -> Result<Self, DecodeError> {
-        Ok(Self {
-            qty: Decode::decode(decoder)?,
-            leaves_qty: Decode::decode(decoder)?,
-            exec_qty: Decode::decode(decoder)?,
-            exec_price_tick: Decode::decode(decoder)?,
-            cum_exec_qty: Decode::decode(decoder)?,
-            cum_exec_value: Decode::decode(decoder)?,
-            taker_price_level_count: Decode::decode(decoder)?,
-            price_tick: Decode::decode(decoder)?,
-            price_match: Decode::decode(decoder)?,
-            tick_size: Decode::decode(decoder)?,
-            exch_timestamp: Decode::decode(decoder)?,
-            local_timestamp: Decode::decode(decoder)?,
-            order_id: Decode::decode(decoder)?,
-            // In a live bot, q isn't used.
-            q: Box::new(()),
-            maker: Decode::decode(decoder)?,
-            order_type: Decode::decode(decoder)?,
-            req: Decode::decode(decoder)?,
-            status: Decode::decode(decoder)?,
-            side: Decode::decode(decoder)?,
-            time_in_force: Decode::decode(decoder)?,
-        })
-    }
-}
-
-#[cfg(feature = "live")]
-impl<'de, Context> BorrowDecode<'de, Context> for Order {
-    fn borrow_decode<D: BorrowDecoder<'de>>(decoder: &mut D) -> Result<Self, DecodeError> {
-        Ok(Self {
-            qty: Decode::decode(decoder)?,
-            leaves_qty: Decode::decode(decoder)?,
-            exec_qty: Decode::decode(decoder)?,
-            exec_price_tick: Decode::decode(decoder)?,
-            cum_exec_qty: Decode::decode(decoder)?,
-            cum_exec_value: Decode::decode(decoder)?,
-            taker_price_level_count: Decode::decode(decoder)?,
-            price_tick: Decode::decode(decoder)?,
-            price_match: Decode::decode(decoder)?,
-            tick_size: Decode::decode(decoder)?,
-            exch_timestamp: Decode::decode(decoder)?,
-            local_timestamp: Decode::decode(decoder)?,
-            order_id: Decode::decode(decoder)?,
-            // In a live bot, q isn't used.
-            q: Box::new(()),
-            maker: Decode::decode(decoder)?,
-            order_type: Decode::decode(decoder)?,
-            req: Decode::decode(decoder)?,
-            status: Decode::decode(decoder)?,
-            side: Decode::decode(decoder)?,
-            time_in_force: Decode::decode(decoder)?,
-        })
-    }
-}
-
-#[cfg(feature = "live")]
-impl Encode for Order {
-    fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
-        self.qty.encode(encoder)?;
-        self.leaves_qty.encode(encoder)?;
-        self.exec_qty.encode(encoder)?;
-        self.exec_price_tick.encode(encoder)?;
-        self.cum_exec_qty.encode(encoder)?;
-        self.cum_exec_value.encode(encoder)?;
-        self.taker_price_level_count.encode(encoder)?;
-        self.price_tick.encode(encoder)?;
-        self.price_match.encode(encoder)?;
-        self.tick_size.encode(encoder)?;
-        self.exch_timestamp.encode(encoder)?;
-        self.local_timestamp.encode(encoder)?;
-        self.order_id.encode(encoder)?;
-        // In a live bot, q isn't used.
-        self.maker.encode(encoder)?;
-        self.order_type.encode(encoder)?;
-        self.req.encode(encoder)?;
-        self.status.encode(encoder)?;
-        self.side.encode(encoder)?;
-        self.time_in_force.encode(encoder)?;
-        Ok(())
-    }
-}
-
-/// An asynchronous request to [`Connector`](`crate::connector::Connector`).
-#[cfg_attr(feature = "live", derive(Encode, Decode))]
-#[derive(Clone, Debug)]
-pub enum LiveRequest {
-    /// An order request, a tuple consisting of an asset number and an [`Order`].
-    Order { symbol: String, order: Order },
-    /// A request to add an instrument for trading.
-    RegisterInstrument {
-        symbol: String,
-        tick_size: f64,
-        lot_size: f64,
-    },
-}
-
 /// Provides state values.
-///
-/// **Note:** In a live bot, currently only `position` value is delivered correctly, and other
-/// values are invalid.
 #[repr(C)]
 #[derive(PartialEq, Clone, Debug, Default)]
 pub struct StateValues {
     pub position: f64,
-    /// Backtest only
     pub balance: f64,
-    /// Backtest only
     pub fee: f64,
     // todo: currently, they are cumulative values, but they need to be values within the record
     //       interval.
-    /// Backtest only
     pub num_trades: i64,
-    /// Backtest only
     pub trading_volume: f64,
-    /// Backtest only
     pub trading_value: f64,
 }
 
@@ -846,16 +592,11 @@ pub enum BuildError {
     BuilderIncomplete(&'static str),
     #[error("{0}")]
     InvalidArgument(&'static str),
-    #[error("`{0}/{1}` already exists")]
-    Duplicate(String, String),
-    #[error("`{0}` is not found")]
-    ConnectorNotFound(String),
     #[error("{0:?}")]
     Error(#[from] anyhow::Error),
 }
 
-/// Used to submit an order in a live bot.
-#[cfg_attr(feature = "live", derive(Decode, Encode))]
+/// Describes an order to submit to the backtester.
 pub struct OrderRequest {
     pub order_id: u64,
     pub price: f64,
@@ -867,15 +608,14 @@ pub struct OrderRequest {
     pub order_type: OrdType,
 }
 
-/// Provides a bot interface for backtesting and live trading.
+/// Provides a bot interface for backtesting.
 pub trait Bot<MD>
 where
     MD: MarketDepth,
 {
     type Error;
 
-    /// In backtesting, this timestamp reflects the time at which the backtesting is conducted
-    /// within the provided data. In a live bot, it's literally the current local timestamp.
+    /// Returns the current timestamp within the replayed data.
     fn current_timestamp(&self) -> i64;
 
     /// Returns the number of assets.
@@ -1065,11 +805,10 @@ where
     ///   the data is reached before the specified timestamp, it returns `Ok(false)`.
     fn elapse(&mut self, duration: i64) -> Result<ElapseResult, Self::Error>;
 
-    /// Elapses time only in backtesting. In live mode, it is ignored.
+    /// Elapses simulated processing time.
     ///
-    /// The [elapse()](Self::elapse()) method exclusively manages time during backtesting, meaning
-    /// that factors such as computing time are not properly accounted for. So, this method can be
-    /// utilized to simulate such processing times.
+    /// The [elapse()](Self::elapse()) method exclusively manages replay time, so this method can be
+    /// used to account for strategy computation time explicitly.
     ///
     /// Args:
     /// * `duration` - Duration to elapse. Nanoseconds is the default unit. However, unit should be
@@ -1080,7 +819,7 @@ where
     ///   the data is reached before the specified timestamp, it returns `Ok(false)`.
     fn elapse_bt(&mut self, duration: i64) -> Result<ElapseResult, Self::Error>;
 
-    /// Closes this backtester or bot.
+    /// Closes this backtester.
     fn close(&mut self) -> Result<(), Self::Error>;
 
     /// Returns the last feed's exchange timestamp and local receipt timestamp.
@@ -1091,8 +830,7 @@ where
     fn order_latency(&self, asset_no: usize) -> Option<(i64, i64, i64)>;
 }
 
-/// Provides bot statistics and [`StateValues`] recording features for backtesting result analysis
-/// or live bot logging.
+/// Provides statistics and [`StateValues`] recording features for backtesting result analysis.
 pub trait Recorder {
     type Error;
 

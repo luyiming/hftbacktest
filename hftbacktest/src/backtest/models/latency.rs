@@ -34,8 +34,7 @@ impl ConstantLatency {
     /// Constructs an instance of `ConstantLatency`.
     ///
     /// `entry_latency` and `response_latency` should match the time unit of the data's timestamps.
-    /// Using nanoseconds across all datasets is recommended, since the live
-    /// [Bot](crate::live::LiveBot) uses nanoseconds.
+    /// Using nanoseconds across all datasets is recommended.
     pub fn new(entry_latency: i64, response_latency: i64) -> Self {
         Self {
             entry_latency,
