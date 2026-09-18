@@ -1,5 +1,10 @@
+pub mod convert;
+pub mod fixed;
+pub mod format;
+pub mod fuse;
 mod npy;
 mod reader;
+pub mod tardis;
 
 use std::{
     marker::PhantomData,
@@ -47,7 +52,7 @@ where
     /// Returns `true` if the `Data` is empty.
     #[inline(always)]
     pub fn is_empty(&self) -> bool {
-        self.ptr.len() == 0
+        self.len() == 0
     }
 
     /// Constructs an empty `Data`.

@@ -9,5 +9,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { version = "0.27.2", features = ["extension-module"] }
-hftbacktest = { path = "../hftbacktest", default-features = false, features = ["backtest", "s3"] }
-hftbacktest-derive = { path = "../hftbacktest-derive" }
+hftbacktest = { path = "../hftbacktest", default-features = false, features = ["backtest"] }

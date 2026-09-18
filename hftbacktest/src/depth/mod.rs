@@ -1,16 +1,10 @@
 use std::collections::HashMap;
 
 pub use btreemarketdepth::BTreeMarketDepth;
-pub use fuse::FusedHashMapMarketDepth;
-pub use hashmapmarketdepth::HashMapMarketDepth;
-pub use roivectormarketdepth::ROIVectorMarketDepth;
 
 use crate::prelude::Side;
 
 mod btreemarketdepth;
-mod fuse;
-mod hashmapmarketdepth;
-mod roivectormarketdepth;
 
 use crate::{
     backtest::data::Data,

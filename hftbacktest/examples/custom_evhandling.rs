@@ -20,7 +20,7 @@ use hftbacktest::{
         proc::{Local, LocalProcessor, NoPartialFillExchange, Processor},
         state::State,
     },
-    depth::{HashMapMarketDepth, L2MarketDepth, MarketDepth},
+    depth::{BTreeMarketDepth, L2MarketDepth, MarketDepth},
     prelude::{Bot, Event, OrdType, Order, OrderId, PriceMatch, Side, StateValues, TimeInForce},
 };
 
@@ -183,7 +183,7 @@ fn main() {
 
     let local = LocalEvHandler {
         local: Local::new(
-            HashMapMarketDepth::new(tick_size, lot_size),
+            BTreeMarketDepth::new(tick_size, lot_size),
             State::new(
                 LinearAsset::new(1.0),
                 TradingValueFeeModel::new(CommonFees::new(-0.00005, 0.0007)),
@@ -194,7 +194,7 @@ fn main() {
     };
 
     let exch = NoPartialFillExchange::new(
-        HashMapMarketDepth::new(tick_size, lot_size),
+        BTreeMarketDepth::new(tick_size, lot_size),
         State::new(
             LinearAsset::new(1.0),
             TradingValueFeeModel::new(CommonFees::new(-0.00005, 0.0007)),

@@ -17,7 +17,7 @@ use crate::{
 /// The depth maps store only observed price levels, so operations over abnormal prices can use
 /// ordered ranges instead of scanning every tick in a wide price interval.
 ///
-/// Best bid and ask ticks are tracked explicitly, similar to `HashMapMarketDepth`. When an L2
+/// Best bid and ask ticks are tracked explicitly. When an L2
 /// update would cross the BBO because a delete was missed, the crossed best level is skipped by
 /// moving to the next valid sparse level. This ignores obviously stale crossed levels but cannot
 /// reconstruct missing quantity updates or deep-book levels that were never received.

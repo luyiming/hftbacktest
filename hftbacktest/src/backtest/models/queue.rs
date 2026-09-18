@@ -1139,7 +1139,7 @@ mod l3_tests {
         backtest::{L3QueueModel, models::L3FIFOQueueModel},
         prelude::{
             Event,
-            HashMapMarketDepth,
+            BTreeMarketDepth,
             L3MarketDepth,
             OrdType,
             Order,
@@ -1153,7 +1153,7 @@ mod l3_tests {
 
     #[test]
     fn fill_by_crossing() {
-        let mut depth = HashMapMarketDepth::new(1.0, 1.0);
+        let mut depth = BTreeMarketDepth::new(1.0, 1.0);
         let mut qm = L3FIFOQueueModel::new();
 
         let ev = Event {
@@ -1215,13 +1215,13 @@ mod l3_tests {
         )
         .unwrap();
 
-        let filled = <L3FIFOQueueModel as L3QueueModel<HashMapMarketDepth>>::on_best_ask_update(
+        let filled = <L3FIFOQueueModel as L3QueueModel<BTreeMarketDepth>>::on_best_ask_update(
             &mut qm, 101, 100,
         )
         .unwrap();
         assert_eq!(filled.len(), 1);
         assert!(
-            !<L3FIFOQueueModel as L3QueueModel<HashMapMarketDepth>>::contains_backtest_order(
+            !<L3FIFOQueueModel as L3QueueModel<BTreeMarketDepth>>::contains_backtest_order(
                 &qm, 1
             )
         );
@@ -1253,13 +1253,13 @@ mod l3_tests {
         )
         .unwrap();
 
-        let filled = <L3FIFOQueueModel as L3QueueModel<HashMapMarketDepth>>::on_best_bid_update(
+        let filled = <L3FIFOQueueModel as L3QueueModel<BTreeMarketDepth>>::on_best_bid_update(
             &mut qm, 100, 101,
         )
         .unwrap();
         assert_eq!(filled.len(), 1);
         assert!(
-            !<L3FIFOQueueModel as L3QueueModel<HashMapMarketDepth>>::contains_backtest_order(
+            !<L3FIFOQueueModel as L3QueueModel<BTreeMarketDepth>>::contains_backtest_order(
                 &qm, 1
             )
         );
@@ -1267,7 +1267,7 @@ mod l3_tests {
 
     #[test]
     fn fill_in_queue() {
-        let mut depth = HashMapMarketDepth::new(1.0, 1.0);
+        let mut depth = BTreeMarketDepth::new(1.0, 1.0);
         let mut qm = L3FIFOQueueModel::new();
 
         let ev = Event {
@@ -1377,7 +1377,7 @@ mod l3_tests {
         let filled = qm.fill_market_feed_order::<false>(2, &ev, &depth).unwrap();
         assert_eq!(filled.len(), 1);
         assert!(
-            !<L3FIFOQueueModel as L3QueueModel<HashMapMarketDepth>>::contains_backtest_order(
+            !<L3FIFOQueueModel as L3QueueModel<BTreeMarketDepth>>::contains_backtest_order(
                 &qm, 1
             )
         );

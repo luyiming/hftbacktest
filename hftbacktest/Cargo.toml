@@ -26,6 +26,10 @@ backtest = ["zip", "uuid", "nom", "hftbacktest-derive"]
 s3 = ["aws-config", "aws-sdk-s3", "tokio"]
 
 [dependencies]
+rust_decimal = "1.43"
+csv = "1.4"
+flate2 = "1"
+tempfile = "3"
 tracing = "0.1.43"
 anyhow = "1.0.100"
 thiserror = "2.0.17"

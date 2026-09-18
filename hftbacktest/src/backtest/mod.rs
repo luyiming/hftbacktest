@@ -42,6 +42,7 @@ use crate::{
 
 /// Provides asset types.
 pub mod assettype;
+pub mod rules;
 
 pub mod models;
 
@@ -1302,7 +1303,7 @@ mod test {
                 TradingValueFeeModel,
             },
         },
-        depth::HashMapMarketDepth,
+        depth::BTreeMarketDepth,
         prelude::{Bot, Event},
         types::{EXCH_EVENT, LOCAL_EVENT},
     };
@@ -1361,7 +1362,7 @@ mod test {
                     .fee_model(TradingValueFeeModel::new(CommonFees::new(0.0, 0.0)))
                     .queue_model(ProbQueueModel::new(PowerProbQueueFunc3::new(3.0)))
                     .exchange(NoPartialFillExchange)
-                    .depth(|| HashMapMarketDepth::new(0.01, 1.0))
+                    .depth(|| BTreeMarketDepth::new(0.01, 1.0))
                     .build()?,
             )
             .build()?;

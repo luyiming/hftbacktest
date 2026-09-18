@@ -138,35 +138,6 @@ impl NpyHeader {
     }
 }
 
-#[allow(dead_code)]
-#[derive(Debug)]
-struct FieldCheckResult {
-    expected: String,
-    found: String,
-}
-
-fn check_field_consistency(
-    expected_types: &DType,
-    found_types: &DType,
-) -> Result<Vec<FieldCheckResult>, String> {
-    let mut discrepancies = vec![];
-    for (expected, found) in expected_types.iter().zip(found_types.iter()) {
-        if expected.ty != found.ty {
-            return Err(format!(
-                "Field type mismatch: expected '{}: {}', but found '{}: {}'",
-                expected.name, expected.ty, found.name, found.ty
-            ));
-        }
-        if expected.name != found.name {
-            discrepancies.push(FieldCheckResult {
-                expected: expected.name.to_string(),
-                found: found.name.to_string(),
-            });
-        }
-    }
-    Ok(discrepancies)
-}
-
 // S3-related code is only compiled when the "s3" feature is enabled
 #[cfg(feature = "s3")]
 mod s3_support {
@@ -238,10 +209,10 @@ pub fn read_npy<R: Read, D: NpyDTyped + Clone>(
 ) -> std::io::Result<Data<D>> {
     let mut buf = DataPtr::new(size);
 
-    let mut read_size = 0;
-    while read_size < size {
-        read_size += reader.read(&mut buf[read_size..])?;
+    if size < 10 {
+        return Err(Error::new(ErrorKind::InvalidData, "truncated numpy header"));
     }
+    reader.read_exact(&mut buf[..])?;
 
     if buf[0..6].to_vec() != b"\x93NUMPY" {
         return Err(Error::new(
@@ -256,9 +227,12 @@ pub fn read_npy<R: Read, D: NpyDTyped + Clone>(
         ));
     }
     let header_len = u16::from_le_bytes(buf[8..10].try_into().unwrap()) as usize;
+    if header_len > size - 10 {
+        return Err(Error::new(ErrorKind::InvalidData, "truncated numpy header"));
+    }
     let header = String::from_utf8(buf[10..(10 + header_len)].to_vec())
         .map_err(|err| Error::new(ErrorKind::InvalidData, err.to_string()))?;
-    let header = NpyHeader::from_header(&header).unwrap();
+    let header = NpyHeader::from_header(&header)?;
 
     if header.fortran_order {
         return Err(Error::new(
@@ -268,18 +242,20 @@ pub fn read_npy<R: Read, D: NpyDTyped + Clone>(
     }
 
     if D::descr() != header.descr {
-        match check_field_consistency(&D::descr(), &header.descr) {
-            Ok(diff) => {
-                println!("Warning: Field name mismatch - {diff:?}");
-            }
-            Err(err) => {
-                return Err(Error::new(ErrorKind::InvalidData, err));
-            }
-        }
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "numpy dtype does not match the expected record layout",
+        ));
     }
 
     if header.shape.len() != 1 {
         return Err(Error::new(ErrorKind::InvalidData, "only 1-d is supported"));
+    }
+    if header.shape[0].checked_mul(std::mem::size_of::<D>()) != Some(size - 10 - header_len) {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "numpy payload length does not match its shape",
+        ));
     }
 
     if !(10 + header_len).is_multiple_of(CACHE_LINE_SIZE) {
@@ -293,8 +269,7 @@ pub fn read_npy<R: Read, D: NpyDTyped + Clone>(
     Ok(data)
 }
 
-/// Reads a structured array `numpy` file. Currently, it doesn't check if the data structure is the
-/// same as what the file contains. Users should be cautious about this.
+/// Reads a structured NumPy array with an exact dtype and payload length check.
 ///
 /// # S3 Support
 /// Supports S3 paths in format: `s3://bucket-name/path/to/file.npy` when the "s3" feature is enabled.
@@ -324,8 +299,7 @@ pub fn read_npy_file<D: NpyDTyped + Clone>(filepath: &str) -> std::io::Result<Da
     }
 }
 
-/// Reads a structured array `numpy` zip archived file. Currently, it doesn't check if the data
-/// structure is the same as what the file contains. Users should be cautious about this.
+/// Reads a named structured array from NPZ with an exact dtype and payload length check.
 ///
 /// # S3 Support
 /// Supports S3 paths in format: `s3://bucket-name/path/to/file.npz` when the "s3" feature is enabled.

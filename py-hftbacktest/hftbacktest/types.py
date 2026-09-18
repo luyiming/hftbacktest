@@ -76,8 +76,8 @@ event_dtype = np.dtype(
         ('ev', 'u8'),
         ('exch_ts', 'i8'),
         ('local_ts', 'i8'),
-        ('px', 'f8'),
-        ('qty', 'f8'),
+        ('px', '<i8'),
+        ('qty', '<i8'),
         ('order_id', 'u8'),
         ('ival', 'i8'),
         ('fval', 'f8')
@@ -86,6 +86,13 @@ event_dtype = np.dtype(
 )
 
 EVENT_ARRAY = np.ndarray[Any, event_dtype]
+
+DATA_SCALE = 8
+metadata_dtype = np.dtype([
+    ('format_version', '<u4'),
+    ('price_scale', '<u4'),
+    ('size_scale', '<u4'),
+])
 
 order_dtype = np.dtype(
     [

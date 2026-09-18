@@ -15,12 +15,12 @@ use hftbacktest::{
         },
         recorder::BacktestRecorder,
     },
-    prelude::{ApplySnapshot, Bot, HashMapMarketDepth},
+    prelude::{ApplySnapshot, Bot, BTreeMarketDepth},
 };
 
 mod algo;
 
-fn prepare_backtest() -> Backtest<HashMapMarketDepth> {
+fn prepare_backtest() -> Backtest<BTreeMarketDepth> {
     let latency_data = (20240501..20240532)
         .map(|date| DataSource::File(format!("latency_{date}.npz")))
         .collect();
@@ -43,7 +43,7 @@ fn prepare_backtest() -> Backtest<HashMapMarketDepth> {
                 .exchange(ExchangeKind::NoPartialFillExchange)
                 .queue_model(queue_model)
                 .depth(|| {
-                    let mut depth = HashMapMarketDepth::new(0.000001, 1.0);
+                    let mut depth = BTreeMarketDepth::new(0.000001, 1.0);
                     depth.apply_snapshot(
                         &read_npz_file("1000SHIBUSDT_20240501_SOD.npz", "data").unwrap(),
                     );

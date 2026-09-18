@@ -17,7 +17,7 @@ use hftbacktest::{
         },
         recorder::BacktestRecorder,
     },
-    prelude::{ApplySnapshot, Bot, HashMapMarketDepth},
+    prelude::{ApplySnapshot, Bot, BTreeMarketDepth},
 };
 
 mod algo;
@@ -67,7 +67,7 @@ fn prepare_backtest(
     lot_size: f64,
     maker_fee: f64,
     taker_fee: f64,
-) -> Backtest<HashMapMarketDepth> {
+) -> Backtest<BTreeMarketDepth> {
     let latency_model = IntpOrderLatency::new(
         latency_files
             .iter()
@@ -93,7 +93,7 @@ fn prepare_backtest(
                 .exchange(ExchangeKind::NoPartialFillExchange)
                 .queue_model(queue_model)
                 .depth(move || {
-                    let mut depth = HashMapMarketDepth::new(tick_size, lot_size);
+                    let mut depth = BTreeMarketDepth::new(tick_size, lot_size);
                     if let Some(file) = initial_snapshot.as_ref() {
                         depth.apply_snapshot(&read_npz_file(file, "data").unwrap());
                     }
