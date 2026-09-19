@@ -71,6 +71,54 @@ class ConversionTests(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in self.root.iterdir()),
                          ["depth.csv.gz", "events.npz", "trades.csv.gz"])
 
+    def test_eod_seeds_next_day_bbo_backoff(self):
+        with gzip.open(self.depth, "wt") as stream:
+            stream.write(
+                "exchange,symbol,timestamp,local_timestamp,is_snapshot,side,price,amount\n"
+                "binance,TEST,1,2,true,bid,101,2\n"
+                "binance,TEST,1,2,true,ask,103,3\n"
+            )
+        self.write_trade("102")
+        eod = self.root / "previous.eod.npz"
+        EXTENSION.convert_fuse(
+            trades_filename=self.trades,
+            depth_filename=self.depth,
+            output_filename=self.output,
+            eod_filename=eod,
+            eod_timestamp=5_000,
+        )
+        with np.load(eod, allow_pickle=False) as archive:
+            self.assertEqual(set(archive.files), {"data", "metadata"})
+            self.assertEqual(len(archive["data"]), 2)
+
+        with gzip.open(self.depth, "wt") as stream:
+            stream.write(
+                "exchange,symbol,timestamp,local_timestamp,is_snapshot,side,price,amount\n"
+            )
+        with gzip.open(self.trades, "wt") as stream:
+            stream.write(
+                "exchange,symbol,timestamp,local_timestamp,id,side,price,amount\n"
+            )
+        ticker = self.root / "book_ticker.csv.gz"
+        with gzip.open(ticker, "wt") as stream:
+            stream.write(
+                "exchange,symbol,timestamp,local_timestamp,ask_amount,ask_price,bid_price,bid_amount\n"
+                "binance,TEST,6,7,3,103,100,4\n"
+            )
+        next_output = self.root / "next.npz"
+        EXTENSION.convert_fuse(
+            trades_filename=self.trades,
+            depth_filename=self.depth,
+            book_ticker_filename=ticker,
+            output_filename=next_output,
+            initial_snapshot_filename=eod,
+        )
+        with np.load(next_output, allow_pickle=False) as archive:
+            rows = archive["data"]
+            deleted = rows[(rows["px"] == 10_100_000_000) & (rows["qty"] == 0)]
+            self.assertEqual(len(deleted), 1)
+            self.assertEqual(int(deleted["ev"][0] & 0xff), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

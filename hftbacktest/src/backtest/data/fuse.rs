@@ -3,11 +3,13 @@ use std::{
     ops::Bound::{Excluded, Unbounded},
 };
 
+use anyhow::{Result, ensure};
+
 use crate::{
     backtest::data::format::StoredEvent,
     types::{
         BUY_EVENT, DEPTH_BBO_EVENT, DEPTH_CLEAR_EVENT, DEPTH_EVENT, DEPTH_SNAPSHOT_EVENT,
-        SELL_EVENT,
+        EXCH_EVENT, LOCAL_EVENT, SELL_EVENT,
     },
 };
 
@@ -31,6 +33,67 @@ pub struct FixedFuse {
 }
 
 impl FixedFuse {
+    pub(crate) fn from_snapshot(events: &[StoredEvent]) -> Result<Self> {
+        let mut fuse = Self::default();
+        for event in events {
+            ensure!(
+                event.ev == DEPTH_SNAPSHOT_EVENT | BUY_EVENT | EXCH_EVENT | LOCAL_EVENT
+                    || event.ev == DEPTH_SNAPSHOT_EVENT | SELL_EVENT | EXCH_EVENT | LOCAL_EVENT,
+                "initial snapshot contains an invalid event"
+            );
+            ensure!(
+                event.px > 0 && event.qty > 0 && event.exch_ts == event.local_ts,
+                "initial snapshot contains an invalid level"
+            );
+            let book = if event.ev & BUY_EVENT != 0 {
+                &mut fuse.bids
+            } else {
+                &mut fuse.asks
+            };
+            ensure!(
+                book.levels
+                    .insert(
+                        event.px,
+                        Level {
+                            qty: event.qty,
+                            timestamp: event.exch_ts,
+                        },
+                    )
+                    .is_none(),
+                "initial snapshot contains a duplicate price level"
+            );
+            book.best_timestamp = event.exch_ts;
+        }
+        if let (Some((&best_bid, _)), Some((&best_ask, _))) = (
+            fuse.bids.levels.last_key_value(),
+            fuse.asks.levels.first_key_value(),
+        ) {
+            ensure!(best_bid < best_ask, "initial snapshot has a crossed book");
+        }
+        Ok(fuse)
+    }
+
+    pub(crate) fn snapshot(&self, timestamp: i64) -> Vec<StoredEvent> {
+        self.bids
+            .levels
+            .iter()
+            .map(|(&px, level)| StoredEvent {
+                ev: DEPTH_SNAPSHOT_EVENT | BUY_EVENT | EXCH_EVENT | LOCAL_EVENT,
+                exch_ts: timestamp,
+                local_ts: timestamp,
+                px,
+                qty: level.qty,
+            })
+            .chain(self.asks.levels.iter().map(|(&px, level)| StoredEvent {
+                ev: DEPTH_SNAPSHOT_EVENT | SELL_EVENT | EXCH_EVENT | LOCAL_EVENT,
+                exch_ts: timestamp,
+                local_ts: timestamp,
+                px,
+                qty: level.qty,
+            }))
+            .collect()
+    }
+
     pub fn process(&mut self, mut event: StoredEvent) -> Vec<StoredEvent> {
         let kind = event.ev & 0xff;
         let buy = event.ev & BUY_EVENT != 0;
@@ -223,6 +286,24 @@ mod tests {
         assert_eq!(
             fuse.bids.levels.keys().copied().collect::<Vec<_>>(),
             vec![99]
+        );
+    }
+
+    #[test]
+    fn snapshot_roundtrip_preserves_bbo_backoff_behavior() {
+        let mut original = FixedFuse::default();
+        original.process(event(DEPTH_EVENT | BUY_EVENT, 90, 1, 1));
+        original.process(event(DEPTH_EVENT | BUY_EVENT, 101, 2, 1));
+        original.process(event(DEPTH_EVENT | SELL_EVENT, 103, 3, 1));
+        let snapshot = original.snapshot(10);
+        let mut restored = FixedFuse::from_snapshot(&snapshot).expect("snapshot should be valid");
+        assert_eq!(restored.snapshot(10), snapshot);
+        assert_eq!(
+            restored.process(event(DEPTH_BBO_EVENT | BUY_EVENT, 100, 4, 11)),
+            vec![
+                event(DEPTH_EVENT | BUY_EVENT, 100, 4, 11),
+                event(DEPTH_EVENT | BUY_EVENT, 101, 0, 11),
+            ]
         );
     }
 }

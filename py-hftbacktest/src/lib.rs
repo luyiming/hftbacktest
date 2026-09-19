@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
-use hftbacktest::backtest::data::convert::{ConvertRequest, SnapshotMode};
+use hftbacktest::backtest::data::convert::{ConvertRequest, EodOutput, SnapshotMode};
 use pyo3::{exceptions::PyValueError, prelude::*};
 
 #[pyfunction]
-#[pyo3(signature = (trades_filename, depth_filename, output_filename, book_ticker_filename=None, snapshot_mode="process", base_latency=0))]
+#[pyo3(signature = (trades_filename, depth_filename, output_filename, book_ticker_filename=None, snapshot_mode="process", base_latency=0, initial_snapshot_filename=None, eod_filename=None, eod_timestamp=None))]
 fn convert_fuse(
     py: Python<'_>,
     trades_filename: PathBuf,
@@ -13,7 +13,15 @@ fn convert_fuse(
     book_ticker_filename: Option<PathBuf>,
     snapshot_mode: &str,
     base_latency: i64,
+    initial_snapshot_filename: Option<PathBuf>,
+    eod_filename: Option<PathBuf>,
+    eod_timestamp: Option<i64>,
 ) -> PyResult<usize> {
+    if eod_filename.is_some() != eod_timestamp.is_some() {
+        return Err(PyValueError::new_err(
+            "eod_filename and eod_timestamp must be provided together",
+        ));
+    }
     let snapshot_mode = match snapshot_mode {
         "process" => SnapshotMode::Process,
         "ignore" => SnapshotMode::Ignore,
@@ -32,6 +40,11 @@ fn convert_fuse(
             output: &output_filename,
             snapshot_mode,
             base_latency,
+            initial_snapshot: initial_snapshot_filename.as_deref(),
+            eod_output: eod_filename
+                .as_deref()
+                .zip(eod_timestamp)
+                .map(|(path, timestamp)| EodOutput { path, timestamp }),
         })
         .map_err(|error| PyValueError::new_err(format!("{error:#}")))
     })

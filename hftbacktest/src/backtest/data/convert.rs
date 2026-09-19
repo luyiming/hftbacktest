@@ -1,10 +1,10 @@
-use std::path::Path;
+use std::{fs::File, path::Path};
 
 use anyhow::{Context, Result, ensure};
 
 use crate::{
     backtest::data::{
-        format::{StoredEvent, write_market_data_file},
+        format::{StoredEvent, read_stored_events, write_market_data_file},
         fuse::FixedFuse,
         tardis::{FeedKind, TardisReader},
     },
@@ -28,6 +28,13 @@ pub struct ConvertRequest<'a> {
     pub output: &'a Path,
     pub snapshot_mode: SnapshotMode,
     pub base_latency: i64,
+    pub initial_snapshot: Option<&'a Path>,
+    pub eod_output: Option<EodOutput<'a>>,
+}
+
+pub struct EodOutput<'a> {
+    pub path: &'a Path,
+    pub timestamp: i64,
 }
 
 fn read_events(path: &Path, kind: FeedKind) -> Result<Vec<StoredEvent>> {
@@ -52,6 +59,24 @@ pub fn convert_fuse(request: ConvertRequest<'_>) -> Result<usize> {
         request.base_latency >= 0,
         "base latency must be nonnegative"
     );
+    if let Some(eod) = &request.eod_output {
+        ensure!(
+            eod.timestamp >= 0,
+            "end-of-day timestamp must be nonnegative"
+        );
+    }
+    let fuse = request
+        .initial_snapshot
+        .map(|path| {
+            let file =
+                File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+            let events = read_stored_events(file)
+                .with_context(|| format!("failed to read {}", path.display()))?;
+            FixedFuse::from_snapshot(&events)
+                .with_context(|| format!("invalid initial snapshot {}", path.display()))
+        })
+        .transpose()?
+        .unwrap_or_default();
     let mut output = read_events(request.trades, FeedKind::Trades)?;
     let depth = read_events(request.depth, FeedKind::Depth)?;
     let ticker = request
@@ -59,8 +84,13 @@ pub fn convert_fuse(request: ConvertRequest<'_>) -> Result<usize> {
         .map(|path| read_events(path, FeedKind::BookTicker))
         .transpose()?
         .unwrap_or_default();
-    output.extend(fuse_events(&depth, &ticker, request.snapshot_mode));
+    let (fused, fuse) = fuse_events(&depth, &ticker, request.snapshot_mode, fuse);
+    output.extend(fused);
     let output = order_events(output, request.base_latency)?;
+    if let Some(eod) = request.eod_output {
+        write_market_data_file(eod.path, &fuse.snapshot(eod.timestamp))
+            .with_context(|| format!("failed to publish {}", eod.path.display()))?;
+    }
     write_market_data_file(request.output, &output)
         .with_context(|| format!("failed to publish {}", request.output.display()))?;
     Ok(output.len())
@@ -70,8 +100,8 @@ fn fuse_events(
     depth: &[StoredEvent],
     ticker: &[StoredEvent],
     mode: SnapshotMode,
-) -> Vec<StoredEvent> {
-    let mut fuse = FixedFuse::default();
+    mut fuse: FixedFuse,
+) -> (Vec<StoredEvent>, FixedFuse) {
     let mut output = Vec::new();
     let (mut d, mut t) = (0, 0);
     let mut at_start = true;
@@ -122,7 +152,7 @@ fn fuse_events(
             at_start = false;
         }
     }
-    output
+    (output, fuse)
 }
 
 fn order_events(mut events: Vec<StoredEvent>, base_latency: i64) -> Result<Vec<StoredEvent>> {
@@ -195,11 +225,15 @@ mod tests {
     #[test]
     fn flushes_snapshot_at_end_of_file() {
         let input = [event(DEPTH_SNAPSHOT_EVENT | BUY_EVENT, 100, 1, 2)];
-        let result = fuse_events(&input, &[], SnapshotMode::Process);
+        let (result, _) = fuse_events(&input, &[], SnapshotMode::Process, FixedFuse::default());
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].ev, DEPTH_CLEAR_EVENT | BUY_EVENT);
         assert_eq!(result[1], input[0]);
-        assert!(fuse_events(&input, &[], SnapshotMode::IgnoreSod).is_empty());
+        assert!(
+            fuse_events(&input, &[], SnapshotMode::IgnoreSod, FixedFuse::default())
+                .0
+                .is_empty()
+        );
     }
 
     #[test]

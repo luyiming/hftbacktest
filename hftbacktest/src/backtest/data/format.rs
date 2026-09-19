@@ -66,7 +66,7 @@ where
     read_array(&mut file, size, dtype)
 }
 
-fn read_stored_events<R: Read + Seek>(reader: R) -> io::Result<Vec<StoredEvent>> {
+pub(crate) fn read_stored_events<R: Read + Seek>(reader: R) -> io::Result<Vec<StoredEvent>> {
     let mut archive = ZipArchive::new(reader)?;
     let metadata: Vec<MarketDataMetadata> =
         read_zip_array(&mut archive, "metadata.npy", &metadata_dtype())?;
