@@ -9,7 +9,7 @@
 //!
 //! ## Key Features
 //! - Complete tick-by-tick simulation with a variable time interval.
-//! - Full order book reconstruction based on Level-2 feeds(Market-By-Price) and Level-3 feeds(Market-By-Order).
+//! - Full order book reconstruction based on Level-2 Market-By-Price feeds.
 //! - Backtest accounting for both feed and order latency, using provided models or your own custom model.
 //! - Order fill simulation that takes into account the order queue position, using provided models or your own custom model.
 //! - Backtesting of multi-asset and multi-exchange models

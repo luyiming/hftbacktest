@@ -189,9 +189,6 @@ mod tests {
             qty: 1,
             exch_ts,
             local_ts,
-            order_id: 0,
-            ival: 0,
-            fval: 0.0,
         }
     }
 

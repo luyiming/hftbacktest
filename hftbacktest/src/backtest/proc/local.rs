@@ -1,3 +1,4 @@
+use rust_decimal::{Decimal, prelude::ToPrimitive};
 use std::collections::{HashMap, hash_map::Entry};
 
 use crate::{
@@ -12,24 +13,10 @@ use crate::{
     },
     depth::{L2MarketDepth, MarketDepth},
     types::{
-        Event,
-        LOCAL_ASK_DEPTH_CLEAR_EVENT,
-        LOCAL_ASK_DEPTH_EVENT,
-        LOCAL_ASK_DEPTH_SNAPSHOT_EVENT,
-        LOCAL_BID_DEPTH_CLEAR_EVENT,
-        LOCAL_BID_DEPTH_EVENT,
-        LOCAL_BID_DEPTH_SNAPSHOT_EVENT,
-        LOCAL_DEPTH_CLEAR_EVENT,
-        LOCAL_EVENT,
-        LOCAL_TRADE_EVENT,
-        OrdType,
-        Order,
-        OrderId,
-        PriceMatch,
-        Side,
-        StateValues,
-        Status,
-        TimeInForce,
+        Event, LOCAL_ASK_DEPTH_CLEAR_EVENT, LOCAL_ASK_DEPTH_EVENT, LOCAL_ASK_DEPTH_SNAPSHOT_EVENT,
+        LOCAL_BID_DEPTH_CLEAR_EVENT, LOCAL_BID_DEPTH_EVENT, LOCAL_BID_DEPTH_SNAPSHOT_EVENT,
+        LOCAL_DEPTH_CLEAR_EVENT, LOCAL_EVENT, LOCAL_TRADE_EVENT, OrdType, Order, OrderId,
+        PriceMatch, Side, StateValues, Status, TimeInForce,
     },
 };
 
@@ -131,12 +118,13 @@ where
                 .orders
                 .get(&order.order_id)
                 .map(|order| (order.cum_exec_qty, order.cum_exec_value))
-                .unwrap_or((0.0, 0.0));
+                .unwrap_or((Decimal::ZERO, 0.0));
             let exec_qty = order.cum_exec_qty - prev_cum_exec_qty;
-            if exec_qty > 0.0 {
+            if exec_qty > Decimal::ZERO {
                 let exec_value = order.cum_exec_value - prev_cum_exec_value;
+                let exec_qty_f64 = exec_qty.to_f64().expect("fill quantity should fit f64");
                 self.state
-                    .apply_fill_qty_price(&order, exec_qty, exec_value / exec_qty);
+                    .apply_fill_qty_price(&order, exec_qty, exec_value / exec_qty_f64);
             }
             // Applies the received order response to the local orders.
             match self.orders.entry(order.order_id) {
@@ -193,9 +181,9 @@ where
         &mut self,
         order_id: OrderId,
         side: Side,
-        price: f64,
+        price: Decimal,
         price_match: PriceMatch,
-        qty: f64,
+        qty: Decimal,
         order_type: OrdType,
         time_in_force: TimeInForce,
         current_timestamp: i64,
@@ -205,16 +193,7 @@ where
             return Err(BacktestError::OrderIdExist);
         }
 
-        let price_tick = (price / self.depth.tick_size()).round() as i64;
-        let mut order = Order::new(
-            order_id,
-            price_tick,
-            self.depth.tick_size(),
-            qty,
-            side,
-            order_type,
-            time_in_force,
-        );
+        let mut order = Order::new(order_id, price, qty, side, order_type, time_in_force);
         order.price_match = price_match;
         order.req = Status::New;
         order.local_timestamp = current_timestamp;
@@ -230,9 +209,9 @@ where
     fn modify(
         &mut self,
         order_id: OrderId,
-        price: f64,
+        price: Decimal,
         price_match: PriceMatch,
-        qty: f64,
+        qty: Decimal,
         current_timestamp: i64,
     ) -> Result<(), BacktestError> {
         let order = self
@@ -245,12 +224,12 @@ where
         }
         validate_price_match(order.order_type, price_match)?;
 
-        let orig_price_tick = order.price_tick;
+        let orig_price = order.price;
         let orig_price_match = order.price_match;
         let orig_qty = order.qty;
 
         if price_match == PriceMatch::None {
-            order.price_tick = (price / self.depth.tick_size()).round() as i64;
+            order.price = price;
         }
         order.price_match = price_match;
         order.qty = qty;
@@ -260,7 +239,7 @@ where
 
         self.order_l2e.request(order.clone(), |order| {
             order.req = Status::Rejected;
-            order.price_tick = orig_price_tick;
+            order.price = orig_price;
             order.price_match = orig_price_match;
             order.qty = orig_qty;
         });
@@ -296,7 +275,7 @@ where
         })
     }
 
-    fn position(&self) -> f64 {
+    fn position(&self) -> Decimal {
         self.state.values().position
     }
 
@@ -343,11 +322,12 @@ where
     fn process(&mut self, ev: &Event) -> Result<(), BacktestError> {
         // Processes a depth event
         if ev.is(LOCAL_BID_DEPTH_CLEAR_EVENT) {
-            self.depth.clear_depth(Side::Buy, ev.px);
+            self.depth.clear_depth(Side::Buy, Some(ev.px));
         } else if ev.is(LOCAL_ASK_DEPTH_CLEAR_EVENT) {
-            self.depth.clear_depth(Side::Sell, ev.px);
+            self.depth.clear_depth(Side::Sell, Some(ev.px));
         } else if ev.is(LOCAL_DEPTH_CLEAR_EVENT) {
-            self.depth.clear_depth(Side::None, 0.0);
+            self.depth.clear_depth(Side::Buy, None);
+            self.depth.clear_depth(Side::Sell, None);
         } else if ev.is(LOCAL_BID_DEPTH_EVENT) || ev.is(LOCAL_BID_DEPTH_SNAPSHOT_EVENT) {
             self.depth.update_bid_depth(ev.px, ev.qty, ev.local_ts);
             if ev.is(LOCAL_BID_DEPTH_SNAPSHOT_EVENT) {

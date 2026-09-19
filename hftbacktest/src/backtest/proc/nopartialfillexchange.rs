@@ -1,3 +1,4 @@
+use rust_decimal::{Decimal, prelude::ToPrimitive};
 use std::{
     cell::RefCell,
     cmp::Ordering,
@@ -11,29 +12,21 @@ use crate::{
         assettype::AssetType,
         models::{FeeModel, LatencyModel, QueueModel},
         order::ExchToLocal,
-        proc::{Processor, price_match::resolve_price_match},
+        proc::{
+            Processor,
+            price_match::{price_satisfies_rule, resolve_price_match},
+        },
+        rules::TickSizeSchedule,
         snapshot::{ProcessorSnapshotFn, SnapshotContext, SnapshotError, SnapshotState},
         state::State,
     },
-    depth::{INVALID_MAX, INVALID_MIN, L2MarketDepth, MarketDepth},
+    depth::{L2MarketDepth, MarketDepth},
     prelude::OrdType,
     types::{
-        EXCH_ASK_DEPTH_CLEAR_EVENT,
-        EXCH_ASK_DEPTH_EVENT,
-        EXCH_ASK_DEPTH_SNAPSHOT_EVENT,
-        EXCH_BID_DEPTH_CLEAR_EVENT,
-        EXCH_BID_DEPTH_EVENT,
-        EXCH_BID_DEPTH_SNAPSHOT_EVENT,
-        EXCH_BUY_TRADE_EVENT,
-        EXCH_DEPTH_CLEAR_EVENT,
-        EXCH_EVENT,
-        EXCH_SELL_TRADE_EVENT,
-        Event,
-        Order,
-        OrderId,
-        Side,
-        Status,
-        TimeInForce,
+        EXCH_ASK_DEPTH_CLEAR_EVENT, EXCH_ASK_DEPTH_EVENT, EXCH_ASK_DEPTH_SNAPSHOT_EVENT,
+        EXCH_BID_DEPTH_CLEAR_EVENT, EXCH_BID_DEPTH_EVENT, EXCH_BID_DEPTH_SNAPSHOT_EVENT,
+        EXCH_BUY_TRADE_EVENT, EXCH_DEPTH_CLEAR_EVENT, EXCH_EVENT, EXCH_SELL_TRADE_EVENT, Event,
+        Order, OrderId, Side, Status, TimeInForce,
     },
 };
 
@@ -72,9 +65,9 @@ where
 {
     // key: order_id, value: Order<Q>
     orders: Rc<RefCell<HashMap<OrderId, Order>>>,
-    // key: order's price tick, value: order_ids
-    buy_orders: HashMap<i64, HashSet<OrderId>>,
-    sell_orders: HashMap<i64, HashSet<OrderId>>,
+    // key: order's price, value: order_ids
+    buy_orders: HashMap<Decimal, HashSet<OrderId>>,
+    sell_orders: HashMap<Decimal, HashSet<OrderId>>,
 
     order_e2l: ExchToLocal<LM>,
 
@@ -84,6 +77,7 @@ where
 
     filled_orders: Vec<OrderId>,
     snapshot_fn: Option<ProcessorSnapshotFn<Self>>,
+    tick_sizes: TickSizeSchedule,
 }
 
 impl<AT, LM, QM, MD, FM> NoPartialFillExchange<AT, LM, QM, MD, FM>
@@ -100,6 +94,7 @@ where
         state: State<AT, FM>,
         queue_model: QM,
         order_e2l: ExchToLocal<LM>,
+        tick_sizes: TickSizeSchedule,
     ) -> Self {
         Self {
             orders: Default::default(),
@@ -111,6 +106,7 @@ where
             queue_model,
             filled_orders: Default::default(),
             snapshot_fn: None,
+            tick_sizes,
         }
     }
 
@@ -133,6 +129,7 @@ where
                 queue_model: source.queue_model.clone(),
                 filled_orders: source.filled_orders.clone(),
                 snapshot_fn: source.snapshot_fn,
+                tick_sizes: source.tick_sizes.clone(),
             })
         });
         self
@@ -141,22 +138,22 @@ where
     fn check_if_sell_filled(
         &mut self,
         order: &mut Order,
-        price_tick: i64,
-        qty: f64,
+        price: Decimal,
+        qty: Decimal,
         timestamp: i64,
     ) -> Result<(), BacktestError> {
-        match order.price_tick.cmp(&price_tick) {
+        match order.price.cmp(&price) {
             Ordering::Greater => {}
             Ordering::Less => {
                 self.filled_orders.push(order.order_id);
-                return self.fill::<true>(order, timestamp, true, order.price_tick);
+                return self.fill::<true>(order, timestamp, true, order.price);
             }
             Ordering::Equal => {
                 // Updates the order's queue position.
                 self.queue_model.trade(order, qty, &self.depth);
-                if self.queue_model.is_filled(order, &self.depth) > 0.0 {
+                if self.queue_model.is_filled(order, &self.depth) > Decimal::ZERO {
                     self.filled_orders.push(order.order_id);
-                    return self.fill::<true>(order, timestamp, true, order.price_tick);
+                    return self.fill::<true>(order, timestamp, true, order.price);
                 }
             }
         }
@@ -166,22 +163,22 @@ where
     fn check_if_buy_filled(
         &mut self,
         order: &mut Order,
-        price_tick: i64,
-        qty: f64,
+        price: Decimal,
+        qty: Decimal,
         timestamp: i64,
     ) -> Result<(), BacktestError> {
-        match order.price_tick.cmp(&price_tick) {
+        match order.price.cmp(&price) {
             Ordering::Greater => {
                 self.filled_orders.push(order.order_id);
-                return self.fill::<true>(order, timestamp, true, order.price_tick);
+                return self.fill::<true>(order, timestamp, true, order.price);
             }
             Ordering::Less => {}
             Ordering::Equal => {
                 // Updates the order's queue position.
                 self.queue_model.trade(order, qty, &self.depth);
-                if self.queue_model.is_filled(order, &self.depth) > 0.0 {
+                if self.queue_model.is_filled(order, &self.depth) > Decimal::ZERO {
                     self.filled_orders.push(order.order_id);
-                    return self.fill::<true>(order, timestamp, true, order.price_tick);
+                    return self.fill::<true>(order, timestamp, true, order.price);
                 }
             }
         }
@@ -193,7 +190,7 @@ where
         order: &mut Order,
         timestamp: i64,
         maker: bool,
-        exec_price_tick: i64,
+        exec_price: Decimal,
     ) -> Result<(), BacktestError> {
         if order.status == Status::Expired
             || order.status == Status::Canceled
@@ -204,18 +201,20 @@ where
 
         order.maker = maker;
         if maker {
-            order.exec_price_tick = order.price_tick;
+            order.exec_price = order.price;
         } else {
-            order.exec_price_tick = exec_price_tick;
+            order.exec_price = exec_price;
         }
 
         order.exec_qty = order.leaves_qty;
         order.cum_exec_qty += order.exec_qty;
-        order.cum_exec_value += order.exec_qty * order.latest_exec_price();
+        order.cum_exec_value += (order.exec_qty * order.latest_exec_price())
+            .to_f64()
+            .expect("execution value should fit f64");
         if !maker {
             order.taker_price_level_count += 1;
         }
-        order.leaves_qty = 0.0;
+        order.leaves_qty = Decimal::ZERO;
         order.status = Status::Filled;
         order.exch_timestamp = timestamp;
 
@@ -234,12 +233,12 @@ where
                 let order = orders.remove(&order_id).unwrap();
                 if order.side == Side::Buy {
                     self.buy_orders
-                        .get_mut(&order.price_tick)
+                        .get_mut(&order.price)
                         .unwrap()
                         .remove(&order_id);
                 } else {
                     self.sell_orders
-                        .get_mut(&order.price_tick)
+                        .get_mut(&order.price)
                         .unwrap()
                         .remove(&order_id);
                 }
@@ -247,9 +246,9 @@ where
         }
     }
 
-    fn on_bid_qty_chg(&mut self, price_tick: i64, prev_qty: f64, new_qty: f64) {
+    fn on_bid_qty_chg(&mut self, price: Decimal, prev_qty: Decimal, new_qty: Decimal) {
         let orders = self.orders.clone();
-        if let Some(order_ids) = self.buy_orders.get(&price_tick) {
+        if let Some(order_ids) = self.buy_orders.get(&price) {
             for order_id in order_ids.iter() {
                 let mut orders_borrowed = orders.borrow_mut();
                 let order = orders_borrowed.get_mut(order_id).unwrap();
@@ -259,9 +258,9 @@ where
         }
     }
 
-    fn on_ask_qty_chg(&mut self, price_tick: i64, prev_qty: f64, new_qty: f64) {
+    fn on_ask_qty_chg(&mut self, price: Decimal, prev_qty: Decimal, new_qty: Decimal) {
         let orders = self.orders.clone();
-        if let Some(order_ids) = self.sell_orders.get(&price_tick) {
+        if let Some(order_ids) = self.sell_orders.get(&price) {
             for order_id in order_ids.iter() {
                 let mut orders_borrowed = orders.borrow_mut();
                 let order = orders_borrowed.get_mut(order_id).unwrap();
@@ -273,32 +272,18 @@ where
 
     fn on_best_bid_update(
         &mut self,
-        prev_best_tick: i64,
-        new_best_tick: i64,
+        _prev_best_price: Option<Decimal>,
+        new_best_price: Option<Decimal>,
         timestamp: i64,
     ) -> Result<(), BacktestError> {
-        // If the best has been significantly updated compared to the previous best, it would be
-        // better to iterate orders dict instead of order price ladder.
         {
             let orders = self.orders.clone();
             let mut orders_borrowed = orders.borrow_mut();
-            if prev_best_tick == INVALID_MIN
-                || (orders_borrowed.len() as i64) < new_best_tick - prev_best_tick
-            {
-                for (_, order) in orders_borrowed.iter_mut() {
-                    if order.side == Side::Sell && order.price_tick <= new_best_tick {
+            if let Some(new_best_price) = new_best_price {
+                for order in orders_borrowed.values_mut() {
+                    if order.side == Side::Sell && order.price <= new_best_price {
                         self.filled_orders.push(order.order_id);
-                        self.fill::<true>(order, timestamp, true, order.price_tick)?;
-                    }
-                }
-            } else {
-                for t in (prev_best_tick + 1)..=new_best_tick {
-                    if let Some(order_ids) = self.sell_orders.get(&t) {
-                        for order_id in order_ids.clone().iter() {
-                            self.filled_orders.push(*order_id);
-                            let order = orders_borrowed.get_mut(order_id).unwrap();
-                            self.fill::<true>(order, timestamp, true, order.price_tick)?;
-                        }
+                        self.fill::<true>(order, timestamp, true, order.price)?;
                     }
                 }
             }
@@ -309,32 +294,18 @@ where
 
     fn on_best_ask_update(
         &mut self,
-        prev_best_tick: i64,
-        new_best_tick: i64,
+        _prev_best_price: Option<Decimal>,
+        new_best_price: Option<Decimal>,
         timestamp: i64,
     ) -> Result<(), BacktestError> {
-        // If the best has been significantly updated compared to the previous best, it would be
-        // better to iterate orders dict instead of order price ladder.
         {
             let orders = self.orders.clone();
             let mut orders_borrowed = orders.borrow_mut();
-            if prev_best_tick == INVALID_MAX
-                || (orders_borrowed.len() as i64) < prev_best_tick - new_best_tick
-            {
-                for (_, order) in orders_borrowed.iter_mut() {
-                    if order.side == Side::Buy && order.price_tick >= new_best_tick {
+            if let Some(new_best_price) = new_best_price {
+                for order in orders_borrowed.values_mut() {
+                    if order.side == Side::Buy && order.price >= new_best_price {
                         self.filled_orders.push(order.order_id);
-                        self.fill::<true>(order, timestamp, true, order.price_tick)?;
-                    }
-                }
-            } else {
-                for t in new_best_tick..prev_best_tick {
-                    if let Some(order_ids) = self.buy_orders.get(&t) {
-                        for order_id in order_ids.clone().iter() {
-                            self.filled_orders.push(*order_id);
-                            let order = orders_borrowed.get_mut(order_id).unwrap();
-                            self.fill::<true>(order, timestamp, true, order.price_tick)?;
-                        }
+                        self.fill::<true>(order, timestamp, true, order.price)?;
                     }
                 }
             }
@@ -343,22 +314,32 @@ where
         Ok(())
     }
 
-    fn ack_new(&mut self, order: &mut Order, timestamp: i64) -> Result<(), BacktestError> {
+    fn ack_new_checked(
+        &mut self,
+        order: &mut Order,
+        timestamp: i64,
+        validate_rule: bool,
+    ) -> Result<(), BacktestError> {
         if self.orders.borrow().contains_key(&order.order_id) {
             return Err(BacktestError::OrderIdExist);
         }
-        let Some(price_tick) = resolve_price_match(order, &self.depth) else {
+        if validate_rule && !price_satisfies_rule(order, timestamp, &self.tick_sizes)? {
+            order.status = Status::Expired;
+            order.exch_timestamp = timestamp;
+            return Ok(());
+        }
+        let Some(price) = resolve_price_match(order, &self.depth) else {
             order.status = Status::Expired;
             order.exch_timestamp = timestamp;
             return Ok(());
         };
-        order.price_tick = price_tick;
+        order.price = price;
 
         if order.side == Side::Buy {
             match order.order_type {
                 OrdType::Limit => {
                     // Checks if the buy order price is greater than or equal to the current best ask.
-                    if order.price_tick >= self.depth.best_ask_tick() {
+                    if self.depth.best_ask().is_some_and(|ask| order.price >= ask) {
                         match order.time_in_force {
                             TimeInForce::GTX => {
                                 order.status = Status::Expired;
@@ -373,24 +354,23 @@ where
                                     order,
                                     timestamp,
                                     false,
-                                    self.depth.best_ask_tick(),
+                                    self.depth.best_ask().expect("crossing ask should exist"),
                                 )
                             }
-                            TimeInForce::Unsupported => Err(BacktestError::InvalidOrderRequest),
                         }
                     } else {
                         match order.time_in_force {
                             TimeInForce::GTC | TimeInForce::GTX => {
                                 // Initializes the order's queue position.
                                 self.queue_model.new_order(order, &self.depth);
-                                order.status = if order.cum_exec_qty > 0.0 {
+                                order.status = if order.cum_exec_qty > Decimal::ZERO {
                                     Status::PartiallyFilled
                                 } else {
                                     Status::New
                                 };
                                 // The exchange accepts this order.
                                 self.buy_orders
-                                    .entry(order.price_tick)
+                                    .entry(order.price)
                                     .or_default()
                                     .insert(order.order_id);
 
@@ -405,21 +385,25 @@ where
                                 order.exch_timestamp = timestamp;
                                 Ok(())
                             }
-                            TimeInForce::Unsupported => Err(BacktestError::InvalidOrderRequest),
                         }
                     }
                 }
                 OrdType::Market => {
                     // Takes the market.
-                    self.fill::<false>(order, timestamp, false, self.depth.best_ask_tick())
+                    if let Some(ask) = self.depth.best_ask() {
+                        self.fill::<false>(order, timestamp, false, ask)
+                    } else {
+                        order.status = Status::Expired;
+                        order.exch_timestamp = timestamp;
+                        Ok(())
+                    }
                 }
-                OrdType::Unsupported => Err(BacktestError::InvalidOrderRequest),
             }
         } else {
             match order.order_type {
                 OrdType::Limit => {
                     // Checks if the sell order price is less than or equal to the current best bid.
-                    if order.price_tick <= self.depth.best_bid_tick() {
+                    if self.depth.best_bid().is_some_and(|bid| order.price <= bid) {
                         match order.time_in_force {
                             TimeInForce::GTX => {
                                 order.status = Status::Expired;
@@ -434,24 +418,23 @@ where
                                     order,
                                     timestamp,
                                     false,
-                                    self.depth.best_bid_tick(),
+                                    self.depth.best_bid().expect("crossing bid should exist"),
                                 )
                             }
-                            TimeInForce::Unsupported => Err(BacktestError::InvalidOrderRequest),
                         }
                     } else {
                         match order.time_in_force {
                             TimeInForce::GTC | TimeInForce::GTX => {
                                 // Initializes the order's queue position.
                                 self.queue_model.new_order(order, &self.depth);
-                                order.status = if order.cum_exec_qty > 0.0 {
+                                order.status = if order.cum_exec_qty > Decimal::ZERO {
                                     Status::PartiallyFilled
                                 } else {
                                     Status::New
                                 };
                                 // The exchange accepts this order.
                                 self.sell_orders
-                                    .entry(order.price_tick)
+                                    .entry(order.price)
                                     .or_default()
                                     .insert(order.order_id);
 
@@ -466,17 +449,25 @@ where
                                 order.exch_timestamp = timestamp;
                                 Ok(())
                             }
-                            TimeInForce::Unsupported => Err(BacktestError::InvalidOrderRequest),
                         }
                     }
                 }
                 OrdType::Market => {
                     // Takes the market.
-                    self.fill::<false>(order, timestamp, false, self.depth.best_bid_tick())
+                    if let Some(bid) = self.depth.best_bid() {
+                        self.fill::<false>(order, timestamp, false, bid)
+                    } else {
+                        order.status = Status::Expired;
+                        order.exch_timestamp = timestamp;
+                        Ok(())
+                    }
                 }
-                OrdType::Unsupported => Err(BacktestError::InvalidOrderRequest),
             }
         }
+    }
+
+    fn ack_new(&mut self, order: &mut Order, timestamp: i64) -> Result<(), BacktestError> {
+        self.ack_new_checked(order, timestamp, true)
     }
 
     fn ack_cancel(&mut self, order: &mut Order, timestamp: i64) -> Result<(), BacktestError> {
@@ -497,12 +488,12 @@ where
         // Deletes the order.
         if order.side == Side::Buy {
             self.buy_orders
-                .get_mut(&order.price_tick)
+                .get_mut(&order.price)
                 .unwrap()
                 .remove(&order.order_id);
         } else {
             self.sell_orders
-                .get_mut(&order.price_tick)
+                .get_mut(&order.price)
                 .unwrap()
                 .remove(&order.order_id);
         }
@@ -512,10 +503,26 @@ where
     }
 
     fn ack_modify(&mut self, order: &mut Order, timestamp: i64) -> Result<(), BacktestError> {
-        let requested_price_tick = resolve_price_match(order, &self.depth);
+        let unchanged_price = self
+            .orders
+            .borrow()
+            .get(&order.order_id)
+            .is_some_and(|existing| existing.price == order.price);
+        if !unchanged_price && !price_satisfies_rule(order, timestamp, &self.tick_sizes)? {
+            order.req = Status::Rejected;
+            order.exch_timestamp = timestamp;
+            return Ok(());
+        }
+        let requested_price = resolve_price_match(order, &self.depth);
         let requested_price_match = order.price_match;
         let requested_qty = order.qty;
         let request_timestamp = order.local_timestamp;
+
+        let Some(requested_price) = requested_price else {
+            order.req = Status::Rejected;
+            order.exch_timestamp = timestamp;
+            return Ok(());
+        };
 
         self.ack_cancel(order, timestamp)?;
         if order.req == Status::Rejected {
@@ -523,30 +530,33 @@ where
         }
         order.local_timestamp = request_timestamp;
         order.price_match = requested_price_match;
-        let Some(requested_price_tick) = requested_price_tick else {
-            return Ok(());
-        };
-
         let crosses_book = order.order_type == OrdType::Limit
             && order.time_in_force == TimeInForce::GTX
             && match order.side {
-                Side::Buy => requested_price_tick >= self.depth.best_ask_tick(),
-                Side::Sell => requested_price_tick <= self.depth.best_bid_tick(),
-                Side::None | Side::Unsupported => unreachable!(),
+                Side::Buy => self
+                    .depth
+                    .best_ask()
+                    .is_some_and(|ask| requested_price >= ask),
+                Side::Sell => self
+                    .depth
+                    .best_bid()
+                    .is_some_and(|bid| requested_price <= bid),
             };
-        if (order.cum_exec_qty > 0.0 && requested_qty <= order.cum_exec_qty) || crosses_book {
+        if (order.cum_exec_qty > Decimal::ZERO && requested_qty <= order.cum_exec_qty)
+            || crosses_book
+        {
             return Ok(());
         }
 
-        order.price_tick = requested_price_tick;
+        order.price = requested_price;
         order.qty = requested_qty;
         order.leaves_qty = requested_qty - order.cum_exec_qty;
-        order.status = if order.cum_exec_qty > 0.0 {
+        order.status = if order.cum_exec_qty > Decimal::ZERO {
             Status::PartiallyFilled
         } else {
             Status::New
         };
-        self.ack_new(order, timestamp)?;
+        self.ack_new_checked(order, timestamp, false)?;
         Ok(())
     }
 }
@@ -575,81 +585,56 @@ where
 
     fn process(&mut self, event: &Event) -> Result<(), BacktestError> {
         if event.is(EXCH_BID_DEPTH_CLEAR_EVENT) {
-            self.depth.clear_depth(Side::Buy, event.px);
+            self.depth.clear_depth(Side::Buy, Some(event.px));
         } else if event.is(EXCH_ASK_DEPTH_CLEAR_EVENT) {
-            self.depth.clear_depth(Side::Sell, event.px);
+            self.depth.clear_depth(Side::Sell, Some(event.px));
         } else if event.is(EXCH_DEPTH_CLEAR_EVENT) {
-            self.depth.clear_depth(Side::None, 0.0);
+            self.depth.clear_depth(Side::Buy, None);
+            self.depth.clear_depth(Side::Sell, None);
         } else if event.is(EXCH_BID_DEPTH_EVENT) || event.is(EXCH_BID_DEPTH_SNAPSHOT_EVENT) {
-            let (price_tick, prev_best_bid_tick, best_bid_tick, prev_qty, new_qty, timestamp) =
-                self.depth
-                    .update_bid_depth(event.px, event.qty, event.exch_ts);
-            self.on_bid_qty_chg(price_tick, prev_qty, new_qty);
-            if best_bid_tick > prev_best_bid_tick {
-                self.on_best_bid_update(prev_best_bid_tick, best_bid_tick, timestamp)?;
+            let (price, prev_best_bid, best_bid, prev_qty, new_qty, timestamp) = self
+                .depth
+                .update_bid_depth(event.px, event.qty, event.exch_ts);
+            self.on_bid_qty_chg(price, prev_qty, new_qty);
+            if best_bid > prev_best_bid {
+                self.on_best_bid_update(prev_best_bid, best_bid, timestamp)?;
             }
             if event.is(EXCH_BID_DEPTH_SNAPSHOT_EVENT) {
                 self.depth.mark_depth_ready();
             }
         } else if event.is(EXCH_ASK_DEPTH_EVENT) || event.is(EXCH_ASK_DEPTH_SNAPSHOT_EVENT) {
-            let (price_tick, prev_best_ask_tick, best_ask_tick, prev_qty, new_qty, timestamp) =
-                self.depth
-                    .update_ask_depth(event.px, event.qty, event.exch_ts);
-            self.on_ask_qty_chg(price_tick, prev_qty, new_qty);
-            if best_ask_tick < prev_best_ask_tick {
-                self.on_best_ask_update(prev_best_ask_tick, best_ask_tick, timestamp)?;
+            let (price, prev_best_ask, best_ask, prev_qty, new_qty, timestamp) = self
+                .depth
+                .update_ask_depth(event.px, event.qty, event.exch_ts);
+            self.on_ask_qty_chg(price, prev_qty, new_qty);
+            if best_ask < prev_best_ask {
+                self.on_best_ask_update(prev_best_ask, best_ask, timestamp)?;
             }
             if event.is(EXCH_ASK_DEPTH_SNAPSHOT_EVENT) {
                 self.depth.mark_depth_ready();
             }
         } else if event.is(EXCH_BUY_TRADE_EVENT) {
-            let price_tick = (event.px / self.depth.tick_size()).round() as i64;
+            let price = event.px;
             let qty = event.qty;
             {
                 let orders = self.orders.clone();
                 let mut orders_borrowed = orders.borrow_mut();
-                if self.depth.best_bid_tick() == INVALID_MIN
-                    || (orders_borrowed.len() as i64) < price_tick - self.depth.best_bid_tick()
-                {
-                    for (_, order) in orders_borrowed.iter_mut() {
-                        if order.side == Side::Sell {
-                            self.check_if_sell_filled(order, price_tick, qty, event.exch_ts)?;
-                        }
-                    }
-                } else {
-                    for t in (self.depth.best_bid_tick() + 1)..=price_tick {
-                        if let Some(order_ids) = self.sell_orders.get(&t) {
-                            for order_id in order_ids.clone().iter() {
-                                let order = orders_borrowed.get_mut(order_id).unwrap();
-                                self.check_if_sell_filled(order, price_tick, qty, event.exch_ts)?;
-                            }
-                        }
+                for order in orders_borrowed.values_mut() {
+                    if order.side == Side::Sell {
+                        self.check_if_sell_filled(order, price, qty, event.exch_ts)?;
                     }
                 }
             }
             self.remove_filled_orders();
         } else if event.is(EXCH_SELL_TRADE_EVENT) {
-            let price_tick = (event.px / self.depth.tick_size()).round() as i64;
+            let price = event.px;
             let qty = event.qty;
             {
                 let orders = self.orders.clone();
                 let mut orders_borrowed = orders.borrow_mut();
-                if self.depth.best_ask_tick() == INVALID_MAX
-                    || (orders_borrowed.len() as i64) < self.depth.best_ask_tick() - price_tick
-                {
-                    for (_, order) in orders_borrowed.iter_mut() {
-                        if order.side == Side::Buy {
-                            self.check_if_buy_filled(order, price_tick, qty, event.exch_ts)?;
-                        }
-                    }
-                } else {
-                    for t in (price_tick..self.depth.best_ask_tick()).rev() {
-                        if let Some(order_ids) = self.buy_orders.get(&t) {
-                            for order_id in order_ids.clone().iter() {
-                                let order = orders_borrowed.get_mut(order_id).unwrap();
-                                self.check_if_buy_filled(order, price_tick, qty, event.exch_ts)?;
-                            }
-                        }
+                for order in orders_borrowed.values_mut() {
+                    if order.side == Side::Buy {
+                        self.check_if_buy_filled(order, price, qty, event.exch_ts)?;
                     }
                 }
             }
@@ -698,5 +683,91 @@ where
         self.order_e2l
             .earliest_send_order_timestamp()
             .unwrap_or(i64::MAX)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rust_decimal::Decimal;
+
+    use super::*;
+    use crate::{
+        backtest::{
+            assettype::LinearAsset,
+            models::{CommonFees, ConstantLatency, RiskAdverseQueueModel, TradingValueFeeModel},
+            order::order_bus,
+            rules::{TickSizeChange, TickSizeSchedule},
+        },
+        depth::{BTreeMarketDepth, L2MarketDepth},
+        types::{OrdType, PriceMatch},
+    };
+
+    fn exchange() -> NoPartialFillExchange<
+        LinearAsset,
+        ConstantLatency,
+        RiskAdverseQueueModel<BTreeMarketDepth>,
+        BTreeMarketDepth,
+        TradingValueFeeModel<CommonFees>,
+    > {
+        let mut depth = BTreeMarketDepth::new();
+        depth.update_bid_depth(Decimal::from(99), Decimal::ONE, 0);
+        depth.update_ask_depth(Decimal::from(101), Decimal::ONE, 0);
+        let schedule = TickSizeSchedule::new(vec![
+            TickSizeChange {
+                effective_from: 0,
+                tick_size: Decimal::new(1, 2),
+            },
+            TickSizeChange {
+                effective_from: 10,
+                tick_size: Decimal::new(1, 1),
+            },
+        ])
+        .unwrap();
+        let (order_e2l, _) = order_bus(ConstantLatency::new(0, 0));
+        NoPartialFillExchange::new(
+            depth,
+            State::new(
+                LinearAsset::new(1.0),
+                TradingValueFeeModel::new(CommonFees::new(0.0, 0.0)),
+            ),
+            RiskAdverseQueueModel::new(),
+            order_e2l,
+            schedule,
+        )
+    }
+
+    #[test]
+    fn rule_switch_allows_unchanged_price_and_rejects_changed_invalid_price() {
+        let mut exchange = exchange();
+        let price = Decimal::new(10005, 2);
+        let mut order = Order::new(
+            1,
+            price,
+            Decimal::ONE,
+            Side::Buy,
+            OrdType::Limit,
+            TimeInForce::GTC,
+        );
+        exchange.ack_new(&mut order, 0).unwrap();
+        assert_eq!(order.status, Status::New);
+
+        let mut quantity_only = order.clone();
+        quantity_only.qty = Decimal::TWO;
+        exchange.ack_modify(&mut quantity_only, 10).unwrap();
+        assert_eq!(quantity_only.status, Status::New);
+        assert_eq!(exchange.orders.borrow()[&1].price, price);
+
+        let mut invalid_price = quantity_only.clone();
+        invalid_price.price = Decimal::new(10006, 2);
+        invalid_price.price_match = PriceMatch::None;
+        exchange.ack_modify(&mut invalid_price, 10).unwrap();
+        assert_eq!(invalid_price.req, Status::Rejected);
+        assert_eq!(exchange.orders.borrow()[&1].price, price);
+
+        let mut missing_price_match = quantity_only;
+        missing_price_match.price_match = PriceMatch::Opponent20;
+        exchange.ack_modify(&mut missing_price_match, 10).unwrap();
+        assert_eq!(missing_price_match.req, Status::Rejected);
+        assert_eq!(exchange.orders.borrow()[&1].price, price);
     }
 }

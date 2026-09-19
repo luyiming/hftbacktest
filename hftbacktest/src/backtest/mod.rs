@@ -2,40 +2,29 @@ use std::{
     collections::HashMap,
     io::Error as IoError,
     ops::{Deref, DerefMut},
+    sync::Arc,
 };
 
 pub use data::DataSource;
 use data::Reader;
 use models::FeeModel;
+use rust_decimal::Decimal;
 use thiserror::Error;
 
-pub use crate::backtest::{
-    models::L3QueueModel,
-    proc::{L3Local, L3NoPartialFillExchange},
-};
 use crate::{
     backtest::{
         assettype::AssetType,
-        data::{Data, FeedLatencyAdjustment, NpyDTyped},
+        data::{adjust_feed_latency, format::read_market_data_file},
         evs::{EventIntentKind, EventSet},
         models::{LatencyModel, QueueModel},
         order::order_bus,
         proc::{Local, LocalProcessor, NoPartialFillExchange, PartialFillExchange, Processor},
         state::State,
     },
-    depth::{L2MarketDepth, L3MarketDepth, MarketDepth},
+    depth::{L2MarketDepth, MarketDepth},
     prelude::{
-        Bot,
-        OrdType,
-        Order,
-        OrderId,
-        OrderRequest,
-        PriceMatch,
-        Side,
-        StateValues,
-        TimeInForce,
-        UNTIL_END_OF_DATA,
-        WaitOrderResponse,
+        Bot, OrdType, Order, OrderId, OrderRequest, PriceMatch, Side, StateValues, TimeInForce,
+        UNTIL_END_OF_DATA, WaitOrderResponse,
     },
     types::{BuildError, ElapseResult, Event},
 };
@@ -81,16 +70,18 @@ pub enum BacktestError {
     EndOfData,
     #[error("data error: {0:?}")]
     DataError(#[from] IoError),
+    #[error("tick size rule error: {0}")]
+    TickSize(#[from] rules::TickSizeError),
 }
 
 /// Backtesting Asset
-pub struct Asset<L: ?Sized, E: ?Sized, D: NpyDTyped + Clone /* todo: ugly bounds */> {
+pub struct Asset<L: ?Sized, E: ?Sized, D: Clone + Send + Sync + 'static> {
     pub local: Box<L>,
     pub exch: Box<E>,
     pub reader: Reader<D>,
 }
 
-impl<L, E, D: NpyDTyped + Clone> Asset<L, E, D> {
+impl<L, E, D: Clone + Send + Sync + 'static> Asset<L, E, D> {
     /// Constructs an instance of `Asset`. Use this method if a custom local processor or an
     /// exchange processor is needed.
     pub fn new(local: L, exch: E, reader: Reader<D>) -> Self {
@@ -111,19 +102,6 @@ impl<L, E, D: NpyDTyped + Clone> Asset<L, E, D> {
         FM: FeeModel + Clone + 'static,
     {
         L2AssetBuilder::new()
-    }
-
-    /// Returns an `L3AssetBuilder`.
-    pub fn l3_builder<LM, AT, QM, MD, FM>() -> L3AssetBuilder<LM, AT, QM, MD, FM>
-    where
-        AT: AssetType + Clone + 'static,
-        MD: MarketDepth + L3MarketDepth + 'static,
-        QM: L3QueueModel<MD> + 'static,
-        LM: LatencyModel + Clone + 'static,
-        FM: FeeModel + Clone + 'static,
-        BacktestError: From<<MD as L3MarketDepth>::Error>,
-    {
-        L3AssetBuilder::new()
     }
 }
 
@@ -148,6 +126,7 @@ pub struct L2AssetBuilder<LM, AT, QM, MD, FM> {
     last_trades_cap: usize,
     queue_model: Option<QM>,
     depth_builder: Option<Box<dyn Fn() -> MD>>,
+    tick_sizes: Option<rules::TickSizeSchedule>,
 }
 
 impl<LM, AT, QM, MD, FM> L2AssetBuilder<LM, AT, QM, MD, FM>
@@ -171,6 +150,7 @@ where
             last_trades_cap: 0,
             queue_model: None,
             depth_builder: None,
+            tick_sizes: None,
         }
     }
 
@@ -252,6 +232,14 @@ where
     {
         Self {
             depth_builder: Some(Box::new(builder)),
+            ..self
+        }
+    }
+
+    /// Sets the time-varying tick-size rules used to validate explicit order prices.
+    pub fn tick_size_schedule(self, tick_sizes: rules::TickSizeSchedule) -> Self {
+        Self {
+            tick_sizes: Some(tick_sizes),
             ..self
         }
     }
@@ -293,16 +281,16 @@ where
         ) -> PartialFillExchange<AT, LM, QM, MD, FM>,
     ) -> Result<Asset<dyn LocalProcessor<MD>, dyn Processor, Event>, BuildError> {
         let reader = if self.latency_offset == 0 {
-            Reader::builder()
+            Reader::builder(read_market_data_file)
                 .parallel_load(self.parallel_load)
                 .data(self.data)
                 .build()
                 .map_err(|err| BuildError::Error(err.into()))?
         } else {
-            Reader::builder()
+            Reader::builder(read_market_data_file)
                 .parallel_load(self.parallel_load)
                 .data(self.data)
-                .preprocessor(FeedLatencyAdjustment::new(self.latency_offset))
+                .preprocess(move |data| adjust_feed_latency(data, self.latency_offset))
                 .build()
                 .map_err(|err| BuildError::Error(err.into()))?
         };
@@ -323,6 +311,10 @@ where
             .fee_model
             .clone()
             .ok_or(BuildError::BuilderIncomplete("fee_model"))?;
+        let tick_sizes = self
+            .tick_sizes
+            .clone()
+            .ok_or(BuildError::BuilderIncomplete("tick_size_schedule"))?;
 
         let (order_e2l, order_l2e) = order_bus(order_latency);
 
@@ -352,6 +344,7 @@ where
                     State::new(asset_type, fee_model),
                     queue_model,
                     order_e2l,
+                    tick_sizes,
                 ));
 
                 Ok(Asset {
@@ -366,6 +359,7 @@ where
                     State::new(asset_type, fee_model),
                     queue_model,
                     order_e2l,
+                    tick_sizes,
                 ));
 
                 Ok(Asset {
@@ -385,218 +379,6 @@ where
     QM: QueueModel<MD> + 'static,
     LM: LatencyModel + Clone + 'static,
     FM: FeeModel + Clone + 'static,
-{
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// A level-3 asset builder.
-pub struct L3AssetBuilder<LM, AT, QM, MD, FM> {
-    latency_model: Option<LM>,
-    asset_type: Option<AT>,
-    data: Vec<DataSource<Event>>,
-    parallel_load: bool,
-    latency_offset: i64,
-    fee_model: Option<FM>,
-    exch_kind: ExchangeKind,
-    last_trades_cap: usize,
-    queue_model: Option<QM>,
-    depth_builder: Option<Box<dyn Fn() -> MD>>,
-}
-
-impl<LM, AT, QM, MD, FM> L3AssetBuilder<LM, AT, QM, MD, FM>
-where
-    AT: AssetType + Clone + 'static,
-    MD: MarketDepth + L3MarketDepth + 'static,
-    QM: L3QueueModel<MD> + 'static,
-    LM: LatencyModel + Clone + 'static,
-    FM: FeeModel + Clone + 'static,
-    BacktestError: From<<MD as L3MarketDepth>::Error>,
-{
-    /// Constructs an `L3AssetBuilder`.
-    pub fn new() -> Self {
-        Self {
-            latency_model: None,
-            asset_type: None,
-            data: vec![],
-            parallel_load: false,
-            latency_offset: 0,
-            fee_model: None,
-            exch_kind: ExchangeKind::NoPartialFillExchange,
-            last_trades_cap: 0,
-            queue_model: None,
-            depth_builder: None,
-        }
-    }
-
-    /// Sets the feed data.
-    pub fn data(self, data: Vec<DataSource<Event>>) -> Self {
-        Self { data, ..self }
-    }
-
-    /// Sets whether to load the next data in parallel with backtesting. This can speed up the
-    /// backtest by reducing data loading time, but it also increases memory usage.
-    /// The default value is `true`.
-    pub fn parallel_load(self, parallel_load: bool) -> Self {
-        Self {
-            parallel_load,
-            ..self
-        }
-    }
-
-    /// Sets the latency offset to adjust the feed latency by the specified amount. This is
-    /// particularly useful in cross-exchange backtesting, where the feed data is collected from a
-    /// different site than the one where the strategy is intended to run.
-    pub fn latency_offset(self, latency_offset: i64) -> Self {
-        Self {
-            latency_offset,
-            ..self
-        }
-    }
-
-    /// Sets a latency model.
-    pub fn latency_model(self, latency_model: LM) -> Self {
-        Self {
-            latency_model: Some(latency_model),
-            ..self
-        }
-    }
-
-    /// Sets an asset type.
-    pub fn asset_type(self, asset_type: AT) -> Self {
-        Self {
-            asset_type: Some(asset_type),
-            ..self
-        }
-    }
-
-    /// Sets a fee model.
-    pub fn fee_model(self, fee_model: FM) -> Self {
-        Self {
-            fee_model: Some(fee_model),
-            ..self
-        }
-    }
-
-    /// Sets an exchange model. The default value is [`NoPartialFillExchange`].
-    pub fn exchange(self, exch_kind: ExchangeKind) -> Self {
-        Self { exch_kind, ..self }
-    }
-
-    /// Sets the initial capacity of the vector storing the last market trades.
-    /// The default value is `0`, indicating that no last trades are stored.
-    pub fn last_trades_capacity(self, capacity: usize) -> Self {
-        Self {
-            last_trades_cap: capacity,
-            ..self
-        }
-    }
-
-    /// Sets a queue model.
-    pub fn queue_model(self, queue_model: QM) -> Self {
-        Self {
-            queue_model: Some(queue_model),
-            ..self
-        }
-    }
-
-    /// Sets a market depth builder.
-    pub fn depth<Builder>(self, builder: Builder) -> Self
-    where
-        Builder: Fn() -> MD + 'static,
-    {
-        Self {
-            depth_builder: Some(Box::new(builder)),
-            ..self
-        }
-    }
-
-    /// Builds an `Asset`.
-    pub fn build(self) -> Result<Asset<dyn LocalProcessor<MD>, dyn Processor, Event>, BuildError> {
-        let reader = if self.latency_offset == 0 {
-            Reader::builder()
-                .parallel_load(self.parallel_load)
-                .data(self.data)
-                .build()
-                .map_err(|err| BuildError::Error(err.into()))?
-        } else {
-            Reader::builder()
-                .parallel_load(self.parallel_load)
-                .data(self.data)
-                .preprocessor(FeedLatencyAdjustment::new(self.latency_offset))
-                .build()
-                .map_err(|err| BuildError::Error(err.into()))?
-        };
-
-        let create_depth = self
-            .depth_builder
-            .as_ref()
-            .ok_or(BuildError::BuilderIncomplete("depth"))?;
-        let order_latency = self
-            .latency_model
-            .clone()
-            .ok_or(BuildError::BuilderIncomplete("order_latency"))?;
-        let asset_type = self
-            .asset_type
-            .clone()
-            .ok_or(BuildError::BuilderIncomplete("asset_type"))?;
-        let fee_model = self
-            .fee_model
-            .clone()
-            .ok_or(BuildError::BuilderIncomplete("fee_model"))?;
-
-        let (order_e2l, order_l2e) = order_bus(order_latency);
-
-        let local = L3Local::new(
-            create_depth(),
-            State::new(asset_type, fee_model),
-            self.last_trades_cap,
-            order_l2e,
-        );
-
-        let queue_model = self
-            .queue_model
-            .ok_or(BuildError::BuilderIncomplete("queue_model"))?;
-        let asset_type = self
-            .asset_type
-            .clone()
-            .ok_or(BuildError::BuilderIncomplete("asset_type"))?;
-        let fee_model = self
-            .fee_model
-            .clone()
-            .ok_or(BuildError::BuilderIncomplete("fee_model"))?;
-
-        match self.exch_kind {
-            ExchangeKind::NoPartialFillExchange => {
-                let exch = L3NoPartialFillExchange::new(
-                    create_depth(),
-                    State::new(asset_type, fee_model),
-                    queue_model,
-                    order_e2l,
-                );
-
-                Ok(Asset {
-                    local: Box::new(local),
-                    exch: Box::new(exch),
-                    reader,
-                })
-            }
-            ExchangeKind::PartialFillExchange => {
-                unimplemented!();
-            }
-        }
-    }
-}
-
-impl<LM, AT, QM, MD, FM> Default for L3AssetBuilder<LM, AT, QM, MD, FM>
-where
-    AT: AssetType + Clone + 'static,
-    MD: MarketDepth + L3MarketDepth + 'static,
-    QM: L3QueueModel<MD> + 'static,
-    LM: LatencyModel + Clone + 'static,
-    FM: FeeModel + Clone + 'static,
-    BacktestError: From<<MD as L3MarketDepth>::Error>,
 {
     fn default() -> Self {
         Self::new()
@@ -664,23 +446,16 @@ impl<P: Processor> DerefMut for BacktestProcessorState<P> {
 
 /// Per asset backtesting state used internally to advance event buffers.
 pub struct BacktestProcessorState<P: Processor> {
-    data: Data<Event>,
+    data: Arc<Vec<Event>>,
     processor: P,
     reader: Reader<Event>,
     row: Option<usize>,
 }
 
-impl<P: Processor> Drop for BacktestProcessorState<P> {
-    fn drop(&mut self) {
-        self.reader
-            .release(std::mem::replace(&mut self.data, Data::empty()));
-    }
-}
-
 impl<P: Processor> BacktestProcessorState<P> {
     fn new(processor: P, reader: Reader<Event>) -> BacktestProcessorState<P> {
         Self {
-            data: Data::empty(),
+            data: Arc::new(Vec::new()),
             processor,
             reader,
             row: None,
@@ -712,7 +487,7 @@ impl<P: Processor> BacktestProcessorState<P> {
 
             let next = self.reader.next_data()?;
 
-            self.reader.release(std::mem::replace(&mut self.data, next));
+            self.data = next;
             self.row = None;
         }
     }
@@ -927,7 +702,7 @@ where
     }
 
     #[inline]
-    fn position(&self, asset_no: usize) -> f64 {
+    fn position(&self, asset_no: usize) -> Decimal {
         self.local.get(asset_no).unwrap().position()
     }
 
@@ -969,8 +744,8 @@ where
         &mut self,
         asset_no: usize,
         order_id: OrderId,
-        price: f64,
-        qty: f64,
+        price: Decimal,
+        qty: Decimal,
         time_in_force: TimeInForce,
         order_type: OrdType,
         wait: bool,
@@ -1001,20 +776,20 @@ where
         &mut self,
         asset_no: usize,
         order_id: OrderId,
-        qty: f64,
+        qty: Decimal,
         time_in_force: TimeInForce,
         order_type: OrdType,
         price_match: PriceMatch,
         wait: bool,
     ) -> Result<ElapseResult, Self::Error> {
-        if matches!(price_match, PriceMatch::None | PriceMatch::Unsupported) {
+        if price_match == PriceMatch::None {
             return Err(BacktestError::InvalidOrderRequest);
         }
         let local = self.local.get_mut(asset_no).unwrap();
         local.submit_order(
             order_id,
             Side::Buy,
-            0.0,
+            Decimal::ZERO,
             price_match,
             qty,
             order_type,
@@ -1036,8 +811,8 @@ where
         &mut self,
         asset_no: usize,
         order_id: OrderId,
-        price: f64,
-        qty: f64,
+        price: Decimal,
+        qty: Decimal,
         time_in_force: TimeInForce,
         order_type: OrdType,
         wait: bool,
@@ -1068,20 +843,20 @@ where
         &mut self,
         asset_no: usize,
         order_id: OrderId,
-        qty: f64,
+        qty: Decimal,
         time_in_force: TimeInForce,
         order_type: OrdType,
         price_match: PriceMatch,
         wait: bool,
     ) -> Result<ElapseResult, Self::Error> {
-        if matches!(price_match, PriceMatch::None | PriceMatch::Unsupported) {
+        if price_match == PriceMatch::None {
             return Err(BacktestError::InvalidOrderRequest);
         }
         let local = self.local.get_mut(asset_no).unwrap();
         local.submit_order(
             order_id,
             Side::Sell,
-            0.0,
+            Decimal::ZERO,
             price_match,
             qty,
             order_type,
@@ -1133,8 +908,8 @@ where
         &mut self,
         asset_no: usize,
         order_id: OrderId,
-        price: f64,
-        qty: f64,
+        price: Decimal,
+        qty: Decimal,
         wait: bool,
     ) -> Result<ElapseResult, Self::Error> {
         let local = self.local.get_mut(asset_no).unwrap();
@@ -1154,15 +929,15 @@ where
         &mut self,
         asset_no: usize,
         order_id: OrderId,
-        qty: f64,
+        qty: Decimal,
         price_match: PriceMatch,
         wait: bool,
     ) -> Result<ElapseResult, Self::Error> {
-        if matches!(price_match, PriceMatch::None | PriceMatch::Unsupported) {
+        if price_match == PriceMatch::None {
             return Err(BacktestError::InvalidOrderRequest);
         }
         let local = self.local.get_mut(asset_no).unwrap();
-        local.modify(order_id, 0.0, price_match, qty, self.cur_ts)?;
+        local.modify(order_id, Decimal::ZERO, price_match, qty, self.cur_ts)?;
 
         if wait {
             return self.goto::<false>(
@@ -1280,106 +1055,5 @@ where
     #[inline]
     fn order_latency(&self, asset_no: usize) -> Option<(i64, i64, i64)> {
         self.local.get(asset_no).unwrap().order_latency()
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use std::error::Error;
-
-    use crate::{
-        backtest::{
-            Backtest,
-            DataSource,
-            ExchangeKind::NoPartialFillExchange,
-            L2AssetBuilder,
-            assettype::LinearAsset,
-            data::Data,
-            models::{
-                CommonFees,
-                ConstantLatency,
-                PowerProbQueueFunc3,
-                ProbQueueModel,
-                TradingValueFeeModel,
-            },
-        },
-        depth::BTreeMarketDepth,
-        prelude::{Bot, Event},
-        types::{EXCH_EVENT, LOCAL_EVENT},
-    };
-
-    #[test]
-    fn skips_unseen_events() -> Result<(), Box<dyn Error>> {
-        let data = Data::from_data(&[
-            Event {
-                ev: EXCH_EVENT | LOCAL_EVENT,
-                exch_ts: 0,
-                local_ts: 0,
-                px: 0.0,
-                qty: 0.0,
-                order_id: 0,
-                ival: 0,
-                fval: 0.0,
-            },
-            Event {
-                ev: LOCAL_EVENT | EXCH_EVENT,
-                exch_ts: 1,
-                local_ts: 1,
-                px: 0.0,
-                qty: 0.0,
-                order_id: 0,
-                ival: 0,
-                fval: 0.0,
-            },
-            Event {
-                ev: EXCH_EVENT,
-                exch_ts: 3,
-                local_ts: 4,
-                px: 0.0,
-                qty: 0.0,
-                order_id: 0,
-                ival: 0,
-                fval: 0.0,
-            },
-            Event {
-                ev: LOCAL_EVENT,
-                exch_ts: 3,
-                local_ts: 4,
-                px: 0.0,
-                qty: 0.0,
-                order_id: 0,
-                ival: 0,
-                fval: 0.0,
-            },
-        ]);
-
-        let mut backtester = Backtest::builder()
-            .add_asset(
-                L2AssetBuilder::default()
-                    .data(vec![DataSource::Data(data)])
-                    .latency_model(ConstantLatency::new(50, 50))
-                    .asset_type(LinearAsset::new(1.0))
-                    .fee_model(TradingValueFeeModel::new(CommonFees::new(0.0, 0.0)))
-                    .queue_model(ProbQueueModel::new(PowerProbQueueFunc3::new(3.0)))
-                    .exchange(NoPartialFillExchange)
-                    .depth(|| BTreeMarketDepth::new(0.01, 1.0))
-                    .build()?,
-            )
-            .build()?;
-
-        // Process first events and advance a single timestep
-        backtester.elapse_bt(1)?;
-        assert_eq!(1, backtester.cur_ts);
-
-        // Check that we correctly skip past events that aren't seen by a given processor
-        backtester.elapse_bt(1)?;
-        assert_eq!(2, backtester.cur_ts);
-        assert_eq!(Some(3), backtester.local[0].row);
-        assert_eq!(Some(2), backtester.exch[0].row);
-
-        backtester.elapse_bt(1)?;
-        assert_eq!(3, backtester.cur_ts);
-
-        Ok(())
     }
 }

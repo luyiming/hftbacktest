@@ -1,11 +1,18 @@
-use std::{io::Error as IoError, mem};
+use std::{
+    fs::File,
+    io::{self, Error as IoError},
+    mem,
+    path::Path,
+    sync::Arc,
+};
 
-use hftbacktest_derive::NpyDTyped;
+use npyz::DType;
+use zip::ZipArchive;
 
 use crate::{
     backtest::{
         BacktestError,
-        data::{Data, DataPreprocess, DataSource, POD, Reader},
+        data::{DataSource, Reader},
     },
     types::Order,
 };
@@ -54,8 +61,7 @@ impl LatencyModel for ConstantLatency {
 }
 
 /// The historical order latency data
-#[repr(C, align(32))]
-#[derive(Clone, Debug, NpyDTyped)]
+#[derive(Clone, Debug, npyz::Serialize, npyz::Deserialize)]
 pub struct OrderLatencyRow {
     /// Timestamp at which the request occurs.
     pub req_ts: i64,
@@ -63,11 +69,19 @@ pub struct OrderLatencyRow {
     pub exch_ts: i64,
     /// Timestamp at which the response is received.
     pub resp_ts: i64,
-    /// For the alignment.
-    pub _padding: i64,
 }
 
-unsafe impl POD for OrderLatencyRow {}
+fn order_latency_dtype() -> DType {
+    DType::parse("[('req_ts', '<i8'), ('exch_ts', '<i8'), ('resp_ts', '<i8')]")
+        .expect("order latency dtype should be valid")
+}
+
+fn load_order_latency(path: &Path) -> io::Result<Vec<OrderLatencyRow>> {
+    let mut archive = ZipArchive::new(File::open(path)?)?;
+    let mut file = archive.by_name("data.npy")?;
+    let size = file.size();
+    crate::backtest::data::npy::read_array(&mut file, size, &order_latency_dtype())
+}
 
 /// Provides order latency based on actual historical order latency data through interpolation.
 ///
@@ -85,11 +99,11 @@ unsafe impl POD for OrderLatencyRow {}
 /// rejection notification.
 ///
 /// **Example**
-/// ```
+/// ```no_run
 /// use hftbacktest::backtest::{DataSource, models::IntpOrderLatency};
 ///
 /// let latency_model = IntpOrderLatency::new(
-///     vec![DataSource::File("latency_20240215.npz".to_string())],
+///     vec![DataSource::File("latency_20240215.npz".into())],
 ///     0
 /// );
 /// ```
@@ -98,8 +112,8 @@ pub struct IntpOrderLatency {
     entry_rn: usize,
     resp_rn: usize,
     reader: Reader<OrderLatencyRow>,
-    data: Data<OrderLatencyRow>,
-    next_data: Data<OrderLatencyRow>,
+    data: Arc<Vec<OrderLatencyRow>>,
+    next_data: Arc<Vec<OrderLatencyRow>>,
 }
 
 impl IntpOrderLatency {
@@ -110,25 +124,25 @@ impl IntpOrderLatency {
         latency_offset: i64,
     ) -> Result<Self, BacktestError> {
         let mut reader = if latency_offset == 0 {
-            Reader::builder()
+            Reader::builder(load_order_latency)
                 .parallel_load(parallel_load)
                 .data(data)
                 .build()?
         } else {
-            Reader::builder()
+            Reader::builder(load_order_latency)
                 .parallel_load(parallel_load)
                 .data(data)
-                .preprocessor(OrderLatencyAdjustment::new(latency_offset))
+                .preprocess(move |data| adjust_order_latency(data, latency_offset))
                 .build()?
         };
         let data = match reader.next_data() {
             Ok(data) => data,
-            Err(BacktestError::EndOfData) => Data::empty(),
+            Err(BacktestError::EndOfData) => Arc::new(Vec::new()),
             Err(e) => return Err(e),
         };
         let next_data = match reader.next_data() {
             Ok(data) => data,
-            Err(BacktestError::EndOfData) => Data::empty(),
+            Err(BacktestError::EndOfData) => Arc::new(Vec::new()),
             Err(e) => return Err(e),
         };
         Ok(Self {
@@ -153,12 +167,10 @@ impl IntpOrderLatency {
         if !self.next_data.is_empty() {
             let next_data = match self.reader.next_data() {
                 Ok(data) => data,
-                Err(BacktestError::EndOfData) => Data::empty(),
+                Err(BacktestError::EndOfData) => Arc::new(Vec::new()),
                 Err(e) => return Err(e),
             };
-            let next_data = mem::replace(&mut self.next_data, next_data);
-            let data = mem::replace(&mut self.data, next_data);
-            self.reader.release(data);
+            self.data = mem::replace(&mut self.next_data, next_data);
             Ok(true)
         } else {
             Ok(false)
@@ -272,23 +284,23 @@ impl LatencyModel for IntpOrderLatency {
     }
 }
 
-#[derive(Clone)]
-struct OrderLatencyAdjustment {
-    latency_offset: i64,
-}
-
-impl OrderLatencyAdjustment {
-    pub fn new(latency_offset: i64) -> Self {
-        Self { latency_offset }
+fn adjust_order_latency(data: &mut [OrderLatencyRow], latency_offset: i64) -> io::Result<()> {
+    let response_offset = latency_offset
+        .checked_mul(2)
+        .ok_or_else(|| IoError::new(io::ErrorKind::InvalidData, "latency offset overflow"))?;
+    for row in data {
+        row.exch_ts = row.exch_ts.checked_add(latency_offset).ok_or_else(|| {
+            IoError::new(
+                io::ErrorKind::InvalidData,
+                "exchange timestamp offset overflow",
+            )
+        })?;
+        row.resp_ts = row.resp_ts.checked_add(response_offset).ok_or_else(|| {
+            IoError::new(
+                io::ErrorKind::InvalidData,
+                "response timestamp offset overflow",
+            )
+        })?;
     }
-}
-
-impl DataPreprocess<OrderLatencyRow> for OrderLatencyAdjustment {
-    fn preprocess(&self, data: &mut Data<OrderLatencyRow>) -> Result<(), IoError> {
-        for i in 0..data.len() {
-            data[i].exch_ts += self.latency_offset;
-            data[i].resp_ts += self.latency_offset + self.latency_offset;
-        }
-        Ok(())
-    }
+    Ok(())
 }

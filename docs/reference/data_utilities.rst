@@ -7,7 +7,6 @@ Data Utilities
    hftbacktest.data.utils.binancefutures
    hftbacktest.data.utils.binancehistmktdata
    hftbacktest.data.utils.bybithistmktdata
-   hftbacktest.data.utils.databento
    hftbacktest.data.utils.difforderbooksnapshot
    hftbacktest.data.utils.hyperliquid
    hftbacktest.data.utils.mexc

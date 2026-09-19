@@ -10,7 +10,6 @@
 ## Rust
 
 ### Backtesting
-* [X] Level 3 Market-By-Order backtesting.
 * [X] Data fusion to provide the most frequent and granular data using different streams with different update frequencies and market depth ranges.
 * [X] Adjust feed and order latency for exchanges located in different regions if the original feed and order latency data was collected at a different site.
 * [ ] Additional queue position model or exchange model.

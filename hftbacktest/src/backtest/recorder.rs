@@ -4,17 +4,18 @@ use std::{
     path::Path,
 };
 
-use hftbacktest_derive::NpyDTyped;
+use npyz::DType;
+use rust_decimal::prelude::ToPrimitive;
+use tempfile::NamedTempFile;
 use zip::{ZipWriter, write::SimpleFileOptions};
 
 use crate::{
-    backtest::data::{POD, write_npy},
+    backtest::data::npy::write_array,
     depth::MarketDepth,
     types::{Bot, Recorder},
 };
 
-#[repr(C)]
-#[derive(NpyDTyped)]
+#[derive(npyz::Serialize, npyz::Deserialize)]
 struct Record {
     timestamp: i64,
     price: f64,
@@ -26,7 +27,12 @@ struct Record {
     trading_value: f64,
 }
 
-unsafe impl POD for Record {}
+fn record_dtype() -> DType {
+    DType::parse(
+        "[('timestamp', '<i8'), ('price', '<f8'), ('position', '<f8'), ('balance', '<f8'), ('fee', '<f8'), ('num_trades', '<i8'), ('trading_volume', '<f8'), ('trading_value', '<f8')]",
+    )
+    .expect("recorder dtype should be valid")
+}
 
 /// Provides recording of the backtesting strategy's state values, which are needed to compute
 /// performance metrics.
@@ -45,14 +51,25 @@ impl Recorder for BacktestRecorder {
         let timestamp = hbt.current_timestamp();
         for asset_no in 0..hbt.num_assets() {
             let depth = hbt.depth(asset_no);
-            let mid_price = (depth.best_bid() + depth.best_ask()) / 2.0;
+            let mid_price = match (depth.best_bid(), depth.best_ask()) {
+                (Some(bid), Some(ask)) => ((bid + ask) / rust_decimal::Decimal::TWO)
+                    .to_f64()
+                    .expect("mid price should fit f64"),
+                _ => f64::NAN,
+            };
             let state_values = hbt.state_values(asset_no);
-            let values = unsafe { self.values.get_unchecked_mut(asset_no) };
+            let values = self
+                .values
+                .get_mut(asset_no)
+                .expect("recorder should contain one buffer per asset");
             values.push(Record {
                 timestamp,
                 price: mid_price,
                 balance: state_values.balance,
-                position: state_values.position,
+                position: state_values
+                    .position
+                    .to_f64()
+                    .expect("position should fit f64"),
                 fee: state_values.fee,
                 trading_volume: state_values.trading_volume,
                 trading_value: state_values.trading_value,
@@ -122,9 +139,13 @@ impl BacktestRecorder {
     where
         P: AsRef<Path>,
     {
-        let file = File::create(path)?;
-
-        let mut zip = ZipWriter::new(file);
+        let path = path.as_ref();
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let mut temporary = NamedTempFile::new_in(parent)?;
+        let mut zip = ZipWriter::new(temporary.as_file_mut());
 
         let options = SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::DEFLATE)
@@ -132,10 +153,12 @@ impl BacktestRecorder {
 
         for (asset_no, values) in self.values.iter().enumerate() {
             zip.start_file(format!("{asset_no}.npy"), options)?;
-            write_npy(&mut zip, values)?;
+            write_array(&mut zip, values, record_dtype())?;
         }
 
         zip.finish()?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(path).map_err(|error| error.error)?;
         Ok(())
     }
 }

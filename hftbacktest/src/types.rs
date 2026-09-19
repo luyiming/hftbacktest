@@ -5,10 +5,10 @@ use std::{
 };
 
 use dyn_clone::DynClone;
-use hftbacktest_derive::NpyDTyped;
+use rust_decimal::Decimal;
 use thiserror::Error;
 
-use crate::{backtest::data::POD, depth::MarketDepth};
+use crate::depth::MarketDepth;
 
 /// Indicates a buy, with specific meaning that can vary depending on the situation. For example,
 /// when combined with a depth event, it means a bid-side event, while when combined with a trade
@@ -34,18 +34,6 @@ pub const DEPTH_SNAPSHOT_EVENT: u64 = 4;
 
 /// Indicates that the best bid and best ask update event is received.
 pub const DEPTH_BBO_EVENT: u64 = 5;
-
-/// Indicates that an order has been added to the order book.
-pub const ADD_ORDER_EVENT: u64 = 10;
-
-/// Indicates that an order in the order book has been canceled.
-pub const CANCEL_ORDER_EVENT: u64 = 11;
-
-/// Indicates that an order in the order book has been modified.
-pub const MODIFY_ORDER_EVENT: u64 = 12;
-
-/// Indicates that an order in the order book has been filled.
-pub const FILL_EVENT: u64 = 13;
 
 /// Indicates that it is a valid event to be handled by the exchange processor at the exchange
 /// timestamp.
@@ -126,42 +114,6 @@ pub const EXCH_BUY_TRADE_EVENT: u64 = EXCH_TRADE_EVENT | BUY_EVENT;
 /// Represents a combination of [`EXCH_TRADE_EVENT`] and [`SELL_EVENT`].
 pub const EXCH_SELL_TRADE_EVENT: u64 = EXCH_TRADE_EVENT | SELL_EVENT;
 
-/// Represents a combination of [`LOCAL_EVENT`] and [`ADD_ORDER_EVENT`].
-pub const LOCAL_ADD_ORDER_EVENT: u64 = LOCAL_EVENT | ADD_ORDER_EVENT;
-
-/// Represents a combination of [`BUY_EVENT`] and [`LOCAL_ADD_ORDER_EVENT`].
-pub const LOCAL_BID_ADD_ORDER_EVENT: u64 = BUY_EVENT | LOCAL_ADD_ORDER_EVENT;
-
-/// Represents a combination of [`SELL_EVENT`] and [`LOCAL_ADD_ORDER_EVENT`].
-pub const LOCAL_ASK_ADD_ORDER_EVENT: u64 = SELL_EVENT | LOCAL_ADD_ORDER_EVENT;
-
-/// Represents a combination of [`LOCAL_EVENT`] and [`CANCEL_ORDER_EVENT`].
-pub const LOCAL_CANCEL_ORDER_EVENT: u64 = LOCAL_EVENT | CANCEL_ORDER_EVENT;
-
-/// Represents a combination of [`LOCAL_EVENT`] and [`MODIFY_ORDER_EVENT`].
-pub const LOCAL_MODIFY_ORDER_EVENT: u64 = LOCAL_EVENT | MODIFY_ORDER_EVENT;
-
-/// Represents a combination of [`LOCAL_EVENT`] and [`FILL_EVENT`].
-pub const LOCAL_FILL_EVENT: u64 = LOCAL_EVENT | FILL_EVENT;
-
-/// Represents a combination of [`EXCH_EVENT`] and [`ADD_ORDER_EVENT`].
-pub const EXCH_ADD_ORDER_EVENT: u64 = EXCH_EVENT | ADD_ORDER_EVENT;
-
-/// Represents a combination of [`BUY_EVENT`] and [`EXCH_ADD_ORDER_EVENT`].
-pub const EXCH_BID_ADD_ORDER_EVENT: u64 = BUY_EVENT | EXCH_ADD_ORDER_EVENT;
-
-/// Represents a combination of [`SELL_EVENT`] and [`EXCH_ADD_ORDER_EVENT`].
-pub const EXCH_ASK_ADD_ORDER_EVENT: u64 = SELL_EVENT | EXCH_ADD_ORDER_EVENT;
-
-/// Represents a combination of [`EXCH_EVENT`] and [`CANCEL_ORDER_EVENT`].
-pub const EXCH_CANCEL_ORDER_EVENT: u64 = EXCH_EVENT | CANCEL_ORDER_EVENT;
-
-/// Represents a combination of [`EXCH_EVENT`] and [`MODIFY_ORDER_EVENT`].
-pub const EXCH_MODIFY_ORDER_EVENT: u64 = EXCH_EVENT | MODIFY_ORDER_EVENT;
-
-/// Represents a combination of [`EXCH_EVENT`] and [`FILL_EVENT`].
-pub const EXCH_FILL_EVENT: u64 = EXCH_EVENT | FILL_EVENT;
-
 /// Indicates that one should continue until the end of the data.
 pub const UNTIL_END_OF_DATA: i64 = i64::MAX;
 
@@ -175,8 +127,7 @@ pub enum WaitOrderResponse {
 }
 
 /// Feed event data.
-#[repr(C, align(64))]
-#[derive(Clone, PartialEq, Debug, NpyDTyped)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Event {
     /// Event flag
     pub ev: u64,
@@ -185,18 +136,10 @@ pub struct Event {
     /// Local timestamp, which is the time at which the event is received by the local.
     pub local_ts: i64,
     /// Price
-    pub px: f64,
+    pub px: Decimal,
     /// Quantity
-    pub qty: f64,
-    /// Order ID is only for the L3 Market-By-Order feed.
-    pub order_id: u64,
-    /// Reserved for an additional i64 value
-    pub ival: i64,
-    /// Reserved for an additional f64 value
-    pub fval: f64,
+    pub qty: Decimal,
 }
-
-unsafe impl POD for Event {}
 
 impl Event {
     /// Checks if this `Event` corresponds to the given event.
@@ -226,10 +169,6 @@ pub enum Side {
     /// In the market depth event, this indicates the ask side; in the market trade event, it
     /// indicates that the trade initiator is a seller.
     Sell = -1,
-    /// No side provided.
-    None = 0,
-    /// No supported side corresponds to the provided value.
-    Unsupported = 127,
 }
 
 impl AsRef<f64> for Side {
@@ -237,8 +176,6 @@ impl AsRef<f64> for Side {
         match self {
             Side::Buy => &1.0f64,
             Side::Sell => &-1.0f64,
-            Side::None => panic!("Side::None"),
-            Side::Unsupported => panic!("Side::Unsupported"),
         }
     }
 }
@@ -248,8 +185,6 @@ impl AsRef<str> for Side {
         match self {
             Side::Buy => "BUY",
             Side::Sell => "SELL",
-            Side::None => panic!("Side::None"),
-            Side::Unsupported => panic!("Side::Unsupported"),
         }
     }
 }
@@ -266,8 +201,6 @@ pub enum Status {
     PartiallyFilled = 5,
     Rejected = 6,
     Replaced = 7,
-    /// No supported order status corresponds to the provided value.
-    Unsupported = 255,
 }
 
 /// Time In Force
@@ -282,8 +215,6 @@ pub enum TimeInForce {
     FOK = 2,
     /// Immediate or Cancel
     IOC = 3,
-    /// No supported time-in-force corresponds to the provided value.
-    Unsupported = 255,
 }
 
 impl AsRef<str> for TimeInForce {
@@ -293,7 +224,6 @@ impl AsRef<str> for TimeInForce {
             TimeInForce::GTX => "GTX",
             TimeInForce::FOK => "FOK",
             TimeInForce::IOC => "IOC",
-            TimeInForce::Unsupported => panic!("TimeInForce::Unsupported"),
         }
     }
 }
@@ -314,7 +244,6 @@ pub enum PriceMatch {
     Queue5 = 6,
     Queue10 = 7,
     Queue20 = 8,
-    Unsupported = 255,
 }
 
 impl AsRef<str> for PriceMatch {
@@ -329,7 +258,6 @@ impl AsRef<str> for PriceMatch {
             PriceMatch::Queue5 => "QUEUE_5",
             PriceMatch::Queue10 => "QUEUE_10",
             PriceMatch::Queue20 => "QUEUE_20",
-            PriceMatch::Unsupported => panic!("PriceMatch::Unsupported"),
         }
     }
 }
@@ -340,7 +268,6 @@ impl AsRef<str> for PriceMatch {
 pub enum OrdType {
     Limit = 0,
     Market = 1,
-    Unsupported = 255,
 }
 
 impl AsRef<str> for OrdType {
@@ -348,7 +275,6 @@ impl AsRef<str> for OrdType {
         match self {
             OrdType::Limit => "LIMIT",
             OrdType::Market => "MARKET",
-            OrdType::Unsupported => panic!("OrdType::Unsupported"),
         }
     }
 }
@@ -357,7 +283,7 @@ impl AsRef<str> for OrdType {
 /// [`QueueModel`](`crate::backtest::models::QueueModel`).
 ///
 /// **Usage:**
-/// ```
+/// ```ignore
 /// impl AnyClone for QueuePos {
 ///     fn as_any(&self) -> &dyn Any {
 ///         self
@@ -386,30 +312,26 @@ impl AnyClone for () {
 
 /// Order
 #[derive(Clone)]
-#[repr(C)]
 pub struct Order {
     /// Total order quantity, including the cumulative executed quantity.
-    pub qty: f64,
+    pub qty: Decimal,
     /// The quantity of this order that has not yet been executed. It represents the remaining
     /// quantity that is still open or active in the market after any partial fills.
-    pub leaves_qty: f64,
+    pub leaves_qty: Decimal,
     /// Executed quantity, only available when this order is executed.
-    pub exec_qty: f64,
-    /// Executed price in ticks (`executed_price / tick_size`), only available when this order is
-    /// executed.
-    pub exec_price_tick: i64,
+    pub exec_qty: Decimal,
+    /// Latest executed price, only available when this order is executed.
+    pub exec_price: Decimal,
     /// Cumulative executed quantity.
-    pub cum_exec_qty: f64,
+    pub cum_exec_qty: Decimal,
     /// Cumulative executed value.
     pub cum_exec_value: f64,
     /// Cumulative number of price levels consumed by taker executions.
     pub taker_price_level_count: u32,
-    /// Order price in ticks (`price / tick_size`).
-    pub price_tick: i64,
-    /// Exchange-side rule used to resolve `price_tick` when the request arrives.
+    /// Exact order price.
+    pub price: Decimal,
+    /// Exchange-side rule used to resolve `price` when the request arrives.
     pub price_match: PriceMatch,
-    /// The tick size of the asset associated with this order.
-    pub tick_size: f64,
     /// The time at which the exchange processes this order, ideally when the matching engine
     /// processes the order, will be set if the value is available.
     pub exch_timestamp: i64,
@@ -436,9 +358,8 @@ impl Order {
     /// Constructs an instance of `Order`.
     pub fn new(
         order_id: u64,
-        price_tick: i64,
-        tick_size: f64,
-        qty: f64,
+        price: Decimal,
+        qty: Decimal,
         side: Side,
         order_type: OrdType,
         time_in_force: TimeInForce,
@@ -446,18 +367,17 @@ impl Order {
         Self {
             qty,
             leaves_qty: qty,
-            price_tick,
+            price,
             price_match: PriceMatch::None,
-            tick_size,
             side,
             time_in_force,
             exch_timestamp: 0,
             status: Status::None,
             local_timestamp: 0,
             req: Status::None,
-            exec_price_tick: 0,
-            exec_qty: 0.0,
-            cum_exec_qty: 0.0,
+            exec_price: Decimal::ZERO,
+            exec_qty: Decimal::ZERO,
+            cum_exec_qty: Decimal::ZERO,
             cum_exec_value: 0.0,
             taker_price_level_count: 0,
             order_id,
@@ -468,22 +388,25 @@ impl Order {
     }
 
     /// Returns the order price.
-    pub fn price(&self) -> f64 {
-        self.price_tick as f64 * self.tick_size
+    pub fn price(&self) -> Decimal {
+        self.price
     }
 
     /// Returns the executed price, only available when this order is executed.
     pub fn exec_price(&self) -> f64 {
-        if self.cum_exec_qty > 0.0 {
-            self.cum_exec_value / self.cum_exec_qty
+        if !self.cum_exec_qty.is_zero() {
+            self.cum_exec_value
+                / rust_decimal::prelude::ToPrimitive::to_f64(&self.cum_exec_qty)
+                    .expect("executed quantity should be representable as f64")
         } else {
-            self.latest_exec_price()
+            rust_decimal::prelude::ToPrimitive::to_f64(&self.latest_exec_price())
+                .expect("executed price should be representable as f64")
         }
     }
 
     /// Returns the latest fill price.
-    pub(crate) fn latest_exec_price(&self) -> f64 {
-        self.exec_price_tick as f64 * self.tick_size
+    pub(crate) fn latest_exec_price(&self) -> Decimal {
+        self.exec_price
     }
 
     /// Returns whether this order is cancelable.
@@ -513,15 +436,14 @@ impl Order {
                 across the files.\n \
                 order={:?}, \
                 response={:?}",
-                &self, &order
+                self, order
             );
         }
 
         self.qty = order.qty;
         self.leaves_qty = order.leaves_qty;
-        self.price_tick = order.price_tick;
+        self.price = order.price;
         self.price_match = order.price_match;
-        self.tick_size = order.tick_size;
         self.side = order.side;
         self.time_in_force = order.time_in_force;
 
@@ -533,7 +455,7 @@ impl Order {
         //     self.local_timestamp = order.local_timestamp;
         // }
         self.req = order.req;
-        self.exec_price_tick = order.exec_price_tick;
+        self.exec_price = order.exec_price;
         self.exec_qty = order.exec_qty;
         self.cum_exec_qty = order.cum_exec_qty;
         self.cum_exec_value = order.cum_exec_value;
@@ -550,16 +472,15 @@ impl Debug for Order {
         f.debug_struct("Order")
             .field("qty", &self.qty)
             .field("leaves_qty", &self.leaves_qty)
-            .field("price_tick", &self.price_tick)
+            .field("price", &self.price)
             .field("price_match", &self.price_match)
-            .field("tick_size", &self.tick_size)
             .field("side", &self.side)
             .field("time_in_force", &self.time_in_force)
             .field("exch_timestamp", &self.exch_timestamp)
             .field("status", &self.status)
             .field("local_timestamp", &self.local_timestamp)
             .field("req", &self.req)
-            .field("exec_price_tick", &self.exec_price_tick)
+            .field("exec_price", &self.exec_price)
             .field("exec_qty", &self.exec_qty)
             .field("cum_exec_qty", &self.cum_exec_qty)
             .field("cum_exec_value", &self.cum_exec_value)
@@ -572,10 +493,9 @@ impl Debug for Order {
 }
 
 /// Provides state values.
-#[repr(C)]
 #[derive(PartialEq, Clone, Debug, Default)]
 pub struct StateValues {
-    pub position: f64,
+    pub position: Decimal,
     pub balance: f64,
     pub fee: f64,
     // todo: currently, they are cumulative values, but they need to be values within the record
@@ -599,10 +519,10 @@ pub enum BuildError {
 /// Describes an order to submit to the backtester.
 pub struct OrderRequest {
     pub order_id: u64,
-    pub price: f64,
+    pub price: Decimal,
     /// If not [`PriceMatch::None`], the exchange ignores `price` and resolves this mode on arrival.
     pub price_match: PriceMatch,
-    pub qty: f64,
+    pub qty: Decimal,
     pub side: Side,
     pub time_in_force: TimeInForce,
     pub order_type: OrdType,
@@ -624,7 +544,7 @@ where
     /// Returns the position you currently hold.
     ///
     /// * `asset_no` - Asset number from which the position will be retrieved.
-    fn position(&self, asset_no: usize) -> f64;
+    fn position(&self, asset_no: usize) -> Decimal;
 
     /// Returns the state's values such as balance, fee, and so on.
     fn state_values(&self, asset_no: usize) -> &StateValues;
@@ -669,8 +589,8 @@ where
         &mut self,
         asset_no: usize,
         order_id: OrderId,
-        price: f64,
-        qty: f64,
+        price: Decimal,
+        qty: Decimal,
         time_in_force: TimeInForce,
         order_type: OrdType,
         wait: bool,
@@ -682,7 +602,7 @@ where
         &mut self,
         asset_no: usize,
         order_id: OrderId,
-        qty: f64,
+        qty: Decimal,
         time_in_force: TimeInForce,
         order_type: OrdType,
         price_match: PriceMatch,
@@ -708,8 +628,8 @@ where
         &mut self,
         asset_no: usize,
         order_id: OrderId,
-        price: f64,
-        qty: f64,
+        price: Decimal,
+        qty: Decimal,
         time_in_force: TimeInForce,
         order_type: OrdType,
         wait: bool,
@@ -721,7 +641,7 @@ where
         &mut self,
         asset_no: usize,
         order_id: OrderId,
-        qty: f64,
+        qty: Decimal,
         time_in_force: TimeInForce,
         order_type: OrdType,
         price_match: PriceMatch,
@@ -748,8 +668,8 @@ where
         &mut self,
         asset_no: usize,
         order_id: OrderId,
-        price: f64,
-        qty: f64,
+        price: Decimal,
+        qty: Decimal,
         wait: bool,
     ) -> Result<ElapseResult, Self::Error>;
 
@@ -758,7 +678,7 @@ where
         &mut self,
         asset_no: usize,
         order_id: OrderId,
-        qty: f64,
+        qty: Decimal,
         price_match: PriceMatch,
         wait: bool,
     ) -> Result<ElapseResult, Self::Error>;
@@ -851,64 +771,20 @@ pub enum ElapseResult {
 
 #[cfg(test)]
 mod tests {
-    use std::mem::{offset_of, size_of};
+    use rust_decimal::Decimal;
 
-    use crate::{
-        prelude::LOCAL_EVENT,
-        types::{
-            BUY_EVENT,
-            Event,
-            LOCAL_BID_DEPTH_CLEAR_EVENT,
-            LOCAL_BID_DEPTH_EVENT,
-            LOCAL_BID_DEPTH_SNAPSHOT_EVENT,
-            LOCAL_BUY_TRADE_EVENT,
-            Order,
-        },
-    };
+    use crate::types::{BUY_EVENT, Event, LOCAL_BID_DEPTH_CLEAR_EVENT};
 
     #[test]
-    fn order_c_layout_matches_python_binding() {
-        assert_eq!(size_of::<Order>(), 128);
-        assert_eq!(offset_of!(Order, price_tick), 56);
-        assert_eq!(offset_of!(Order, price_match), 64);
-        assert_eq!(offset_of!(Order, tick_size), 72);
-        assert_eq!(offset_of!(Order, order_id), 96);
-        assert_eq!(offset_of!(Order, status), 123);
-    }
-
-    #[test]
-    fn test_event_is() {
+    fn event_flags_are_independent_of_decimal_payloads() {
         let event = Event {
-            ev: LOCAL_BID_DEPTH_CLEAR_EVENT | (1 << 20),
+            ev: LOCAL_BID_DEPTH_CLEAR_EVENT | BUY_EVENT,
             exch_ts: 0,
             local_ts: 0,
-            order_id: 0,
-            px: 0.0,
-            qty: 0.0,
-            ival: 0,
-            fval: 0.0,
+            px: Decimal::new(10025, 2),
+            qty: Decimal::new(1, 8),
         };
-
-        assert!(!event.is(LOCAL_BID_DEPTH_EVENT));
-        assert!(!event.is(LOCAL_BUY_TRADE_EVENT));
         assert!(event.is(LOCAL_BID_DEPTH_CLEAR_EVENT));
-
-        let event = Event {
-            ev: LOCAL_EVENT | BUY_EVENT | 0xff,
-            exch_ts: 0,
-            local_ts: 0,
-            order_id: 0,
-            px: 0.0,
-            qty: 0.0,
-            ival: 0,
-            fval: 0.0,
-        };
-
-        assert!(!event.is(LOCAL_BID_DEPTH_EVENT));
-        assert!(!event.is(LOCAL_BUY_TRADE_EVENT));
-        assert!(!event.is(LOCAL_BID_DEPTH_CLEAR_EVENT));
-        assert!(!event.is(LOCAL_BID_DEPTH_SNAPSHOT_EVENT));
-        assert!(event.is(LOCAL_EVENT));
         assert!(event.is(BUY_EVENT));
     }
 }

@@ -119,9 +119,6 @@ impl TardisReader {
             local_ts,
             px,
             qty,
-            order_id: 0,
-            ival: 0,
-            fval: 0.0,
         };
         let events = match self.kind {
             FeedKind::BookTicker => vec![
@@ -225,9 +222,6 @@ mod tests {
                 local_ts: 2000,
                 px: i64::MAX,
                 qty: 1,
-                order_id: 0,
-                ival: 0,
-                fval: 0.0,
             }])
         );
         assert!(input.next_events().expect("EOF should parse").is_none());

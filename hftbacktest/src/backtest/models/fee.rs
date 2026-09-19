@@ -97,7 +97,6 @@ impl FeeModel for TradingValueFeeModel<DirectionalFees> {
             (false, Side::Sell) => {
                 (self.fees.common_fees.taker_fee + self.fees.seller_fee) * fill.value
             }
-            _ => unreachable!(),
         }
     }
 }
@@ -140,7 +139,6 @@ impl FeeModel for TradingQtyFeeModel<DirectionalFees> {
             (false, Side::Sell) => {
                 self.fees.common_fees.taker_fee * fill.qty + self.fees.seller_fee * fill.value
             }
-            _ => unreachable!(),
         }
     }
 }

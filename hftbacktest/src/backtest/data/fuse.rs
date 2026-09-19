@@ -176,9 +176,6 @@ mod tests {
             qty,
             exch_ts: timestamp,
             local_ts: timestamp + 1,
-            order_id: 0,
-            ival: 0,
-            fval: 0.0,
         }
     }
 

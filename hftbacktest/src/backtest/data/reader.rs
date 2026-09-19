@@ -1,295 +1,156 @@
 use std::{
     cell::RefCell,
     collections::HashMap,
-    io::{Error as IoError, ErrorKind},
+    ffi::OsStr,
+    io::{self, Error as IoError, ErrorKind},
+    path::{Path, PathBuf},
     rc::Rc,
     sync::{
-        Arc,
+        Arc, Weak,
         mpsc::{Receiver, Sender, channel},
     },
     thread,
 };
 
-use uuid::Uuid;
+use crate::{backtest::BacktestError, types::Event};
 
-use crate::{
-    backtest::{
-        BacktestError,
-        data::{
-            Data,
-            POD,
-            npy::{NpyDTyped, read_npy_file, read_npz_file},
-        },
-    },
-    types::Event,
-};
+type LoadChunk<D> = fn(&Path) -> io::Result<Vec<D>>;
+type Preprocessor<D> = Arc<dyn Fn(&mut [D]) -> io::Result<()> + Send + Sync>;
 
-/// Data source for the [`Reader`].
+/// A file or immutable in-memory chunk consumed by a [`Reader`].
 #[derive(Clone, Debug)]
-pub enum DataSource<D>
-where
-    D: POD + Clone,
-{
-    /// Data needs to be loaded from the specified file. This should be a `numpy` file.
-    ///
-    /// It will be loaded when needed and released
-    /// when no [Processor](`crate::backtest::proc::Processor`) is reading the data.
-    File(String),
-    /// Data is loaded and set by the user.
-    Data(Data<D>),
+pub enum DataSource<D> {
+    File(PathBuf),
+    Memory(Arc<Vec<D>>),
 }
 
-#[derive(Debug)]
-struct CachedData<D>
-where
-    D: POD + Clone,
-{
-    count: usize,
-    ready: bool,
-    data: Data<D>,
-    error: Option<Arc<IoError>>,
-}
-
-impl<D> CachedData<D>
-where
-    D: POD + Clone,
-{
-    pub fn new(data: Data<D>) -> Self {
-        Self {
-            count: 0,
-            ready: true,
-            data,
-            error: None,
-        }
-    }
-
-    pub fn empty() -> Self {
-        Self {
-            count: 0,
-            ready: false,
-            data: Data::empty(),
-            error: None,
-        }
-    }
-
-    pub fn set(&mut self, data: Data<D>) {
-        self.data = data;
-    }
-
-    pub fn checkout(&mut self) -> Data<D> {
-        self.count += 1;
-        self.data.clone()
-    }
-
-    pub fn turn_in(&mut self) -> bool {
-        assert!(self.count > 0, "released data should have an active reader");
-        self.count -= 1;
-        self.count == 0
+impl<D> From<Vec<D>> for DataSource<D> {
+    fn from(data: Vec<D>) -> Self {
+        Self::Memory(Arc::new(data))
     }
 }
 
-/// Provides a data cache that allows both the local processor and exchange processor to access the
-/// same or different data based on their timestamps without the need for reloading.
-#[derive(Clone, Debug)]
-pub struct Cache<D>(Rc<RefCell<HashMap<String, CachedData<D>>>>)
-where
-    D: POD + Clone;
-
-impl<D> Cache<D>
-where
-    D: POD + Clone,
-{
-    fn retain(&mut self, data: &Data<D>) {
-        let mut cache = self.0.borrow_mut();
-        if let Some(cached) = cache.values_mut().find(|cached| data.data_eq(&cached.data)) {
-            cached.count += 1;
-        } else {
-            assert!(
-                data.is_empty(),
-                "active processor data should remain in its reader cache"
-            );
-        }
-    }
-
-    fn fail(&mut self, key: &str, error: IoError) {
-        let mut cache = self.0.borrow_mut();
-        let cached = cache
-            .get_mut(key)
-            .expect("loading data should have a cache entry");
-        cached.error = Some(Arc::new(error));
-        cached.ready = true;
-    }
-
-    fn error(&self, key: &str) -> Option<Arc<IoError>> {
-        self.0
-            .borrow()
-            .get(key)
-            .expect("requested data should have a cache entry")
-            .error
-            .clone()
-    }
-
-    /// Constructs an instance of `Cache`.
-    pub fn new() -> Self {
-        Self(Default::default())
-    }
-
-    /// Inserts a key-value pair into the `Cache`.
-    pub fn insert(&mut self, key: String, data: Data<D>) {
-        self.0.borrow_mut().insert(key, CachedData::new(data));
-    }
-
-    /// Prepares cached data by inserting a key-value pair with empty data into the `Cache`.
-    /// This placeholder will be replaced when the actual data is ready.
-    pub fn prepare(&mut self, key: String) {
-        self.0.borrow_mut().insert(key, CachedData::empty());
-    }
-
-    /// Removes the [`Data`] if all retrieved [`Data`] are released.
-    pub fn remove(&mut self, data: Data<D>) {
-        let mut remove = None;
-        for (key, cached_data) in self.0.borrow_mut().iter_mut() {
-            if data.data_eq(&cached_data.data) {
-                if cached_data.turn_in() {
-                    remove = Some(key.clone());
-                }
-                break;
-            }
-        }
-        if let Some(key) = remove {
-            self.0.borrow_mut().remove(&key).unwrap();
-        }
-    }
-
-    /// Returns `true` if the `Cache` contains the [`Data`] for the specified key.
-    pub fn contains(&self, key: &str) -> bool {
-        self.0.borrow().contains_key(key)
-    }
-
-    /// Returns the [`Data`] corresponding to the key.
-    pub fn get(&mut self, key: &str) -> Data<D> {
-        let mut borrowed = self.0.borrow_mut();
-        let cached_data = borrowed.get_mut(key).unwrap();
-        cached_data.checkout()
-    }
-
-    /// Sets the [`Data`] for the specified key and marks it as ready.
-    pub fn set(&mut self, key: &str, data: Data<D>) {
-        let mut borrowed = self.0.borrow_mut();
-        let cached_data = borrowed.get_mut(key).unwrap();
-        cached_data.set(data);
-        cached_data.ready = true;
-    }
-
-    /// Returns `true` if the [`Data`] for the specified key is ready.
-    pub fn is_ready(&self, key: &str) -> bool {
-        self.0.borrow().get(key).unwrap().ready
+impl<D> From<Arc<Vec<D>>> for DataSource<D> {
+    fn from(data: Arc<Vec<D>>) -> Self {
+        Self::Memory(data)
     }
 }
 
-impl<D> Default for Cache<D>
-where
-    D: POD + Clone,
-{
+impl<D> From<PathBuf> for DataSource<D> {
+    fn from(path: PathBuf) -> Self {
+        Self::File(path)
+    }
+}
+
+impl<D> From<&Path> for DataSource<D> {
+    fn from(path: &Path) -> Self {
+        Self::File(path.to_path_buf())
+    }
+}
+
+enum CacheEntry<D> {
+    Loading,
+    Ready(Arc<Vec<D>>),
+    Shared(Weak<Vec<D>>),
+    Failed(Arc<IoError>),
+}
+
+#[derive(Clone)]
+struct Cache<D>(Rc<RefCell<HashMap<usize, CacheEntry<D>>>>);
+
+impl<D> Default for Cache<D> {
     fn default() -> Self {
-        Self::new()
+        Self(Rc::new(RefCell::new(HashMap::new())))
     }
 }
 
-/// Directly implementing `Send` for `Data` may lead to unsafe sharing between threads. To mitigate
-/// this risk, `DataSend` is used to wrap `Data`, which implements the `Send` marker trait. This
-/// transfer ownership between threads while requiring careful consideration.
-struct DataSend<D>(Data<D>)
-where
-    D: NpyDTyped + Clone;
+impl<D> Cache<D> {
+    fn needs_load(&self, key: usize) -> bool {
+        let mut entries = self.0.borrow_mut();
+        match entries.get(&key) {
+            None => true,
+            Some(CacheEntry::Shared(data)) if data.upgrade().is_none() => {
+                entries.remove(&key);
+                true
+            }
+            Some(_) => false,
+        }
+    }
 
-impl<D> DataSend<D>
-where
-    D: NpyDTyped + Clone,
-{
-    pub fn unwrap(self) -> Data<D> {
+    fn prepare(&self, key: usize) {
+        self.0.borrow_mut().insert(key, CacheEntry::Loading);
+    }
+
+    fn set(&self, key: usize, data: Arc<Vec<D>>) {
+        self.0.borrow_mut().insert(key, CacheEntry::Ready(data));
+    }
+
+    fn fail(&self, key: usize, error: IoError) {
         self.0
+            .borrow_mut()
+            .insert(key, CacheEntry::Failed(Arc::new(error)));
+    }
+
+    fn is_loading(&self, key: usize) -> bool {
+        matches!(self.0.borrow().get(&key), Some(CacheEntry::Loading))
+    }
+
+    fn error(&self, key: usize) -> Option<Arc<IoError>> {
+        match self.0.borrow().get(&key) {
+            Some(CacheEntry::Failed(error)) => Some(error.clone()),
+            _ => None,
+        }
+    }
+
+    fn checkout(&self, key: usize) -> Option<Arc<Vec<D>>> {
+        let mut entries = self.0.borrow_mut();
+        let entry = entries.get_mut(&key)?;
+        match entry {
+            CacheEntry::Ready(data) => {
+                let data = data.clone();
+                *entry = CacheEntry::Shared(Arc::downgrade(&data));
+                Some(data)
+            }
+            CacheEntry::Shared(data) => data.upgrade(),
+            CacheEntry::Loading | CacheEntry::Failed(_) => None,
+        }
     }
 }
-unsafe impl<D> Send for DataSend<D> where D: NpyDTyped + Clone {}
 
-struct LoadDataResult<D>
-where
-    D: NpyDTyped + Clone,
-{
-    key: String,
-    result: Result<DataSend<D>, IoError>,
+struct LoadResult<D> {
+    key: usize,
+    result: io::Result<Arc<Vec<D>>>,
 }
 
 #[derive(Debug, thiserror::Error)]
 #[error("failed to read {path}")]
 struct FileLoadError {
-    path: String,
+    path: PathBuf,
     #[source]
     source: Arc<IoError>,
 }
 
-impl<D> LoadDataResult<D>
-where
-    D: NpyDTyped + Clone,
-{
-    pub fn ok(key: String, data: Data<D>) -> Self {
-        Self {
-            key,
-            result: Ok(DataSend(data)),
-        }
-    }
-
-    pub fn err(key: String, error: IoError) -> Self {
-        Self {
-            key,
-            result: Err(error),
-        }
-    }
-}
-
-/// A builder for constructing [`Reader`].
-pub struct ReaderBuilder<D>
-where
-    D: NpyDTyped + POD + Clone,
-{
-    data_key_list: Vec<String>,
-    cache: Cache<D>,
-    temporary_data: HashMap<String, Data<D>>,
+/// Builds a chunk reader around a format-specific loading function.
+pub struct ReaderBuilder<D> {
+    sources: Vec<DataSource<D>>,
+    loader: LoadChunk<D>,
     parallel_load: bool,
-    preprocessor: Option<Arc<Box<dyn DataPreprocess<D> + Sync + Send + 'static>>>,
-}
-
-impl<D> Default for ReaderBuilder<D>
-where
-    D: NpyDTyped + POD + Clone,
-{
-    fn default() -> Self {
-        Self {
-            data_key_list: Default::default(),
-            cache: Default::default(),
-            temporary_data: Default::default(),
-            parallel_load: false,
-            preprocessor: None,
-        }
-    }
+    preprocessor: Option<Preprocessor<D>>,
 }
 
 impl<D> ReaderBuilder<D>
 where
-    D: NpyDTyped + POD + Clone,
+    D: Clone + Send + Sync + 'static,
 {
-    /// Constructs a `ReaderBuilder`.
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(loader: LoadChunk<D>) -> Self {
+        Self {
+            sources: Vec::new(),
+            loader,
+            parallel_load: false,
+            preprocessor: None,
+        }
     }
 
-    /// Sets whether to load the next data in parallel. This allows [`Reader`] to not only load the
-    /// next data but also preload subsequent data, ensuring it is ready in advance.
-    ///
-    /// Loading is performed by spawning a separate thread.
-    ///
-    /// The default value is `true`.
     pub fn parallel_load(self, parallel_load: bool) -> Self {
         Self {
             parallel_load,
@@ -297,259 +158,213 @@ where
         }
     }
 
-    /// Sets a [`DataPreprocess`].
-    pub fn preprocessor<Preprocessor>(self, preprocessor: Preprocessor) -> Self
+    pub fn preprocess<F>(self, preprocessor: F) -> Self
     where
-        Preprocessor: DataPreprocess<D> + Sync + Send + 'static,
+        F: Fn(&mut [D]) -> io::Result<()> + Send + Sync + 'static,
     {
         Self {
-            preprocessor: Some(Arc::new(Box::new(preprocessor))),
+            preprocessor: Some(Arc::new(preprocessor)),
             ..self
         }
     }
 
-    /// Sets the data to be read by [`Reader`]. The items in the `data` vector should be arranged in
-    /// the chronological order.
+    /// Sets chunks in chronological order.
     pub fn data(self, data: Vec<DataSource<D>>) -> Self {
-        let mut data_key_list = self.data_key_list;
-        let mut temporary_data = self.temporary_data;
-        for item in data {
-            match item {
-                DataSource::File(filepath) => {
-                    data_key_list.push(filepath);
-                }
-                DataSource::Data(data) => {
-                    let key = Uuid::new_v4().to_string();
-                    data_key_list.push(key.clone());
-                    temporary_data.insert(key, data);
-                }
-            }
-        }
         Self {
-            data_key_list,
-            temporary_data,
+            sources: data,
             ..self
         }
     }
 
-    /// Builds a [`Reader`].
-    pub fn build(self) -> Result<Reader<D>, IoError> {
-        let mut cache = self.cache.clone();
-        let mut memory_data = HashMap::new();
-        for (key, mut data) in self.temporary_data {
-            if let Some(p) = &self.preprocessor {
-                p.preprocess(&mut data)?;
-            }
-            cache.insert(key.clone(), data.clone());
-            memory_data.insert(key, data);
-        }
-
-        let (tx, rx) = channel();
+    pub fn build(self) -> io::Result<Reader<D>> {
+        let sources = if let Some(preprocessor) = &self.preprocessor {
+            self.sources
+                .into_iter()
+                .map(|source| match source {
+                    DataSource::File(path) => Ok(DataSource::File(path)),
+                    DataSource::Memory(data) => {
+                        let mut owned = data.as_ref().clone();
+                        preprocessor(&mut owned)?;
+                        Ok(DataSource::Memory(Arc::new(owned)))
+                    }
+                })
+                .collect::<io::Result<Vec<_>>>()?
+        } else {
+            self.sources
+        };
+        let (sender, receiver) = channel();
         Ok(Reader {
-            data_key_list: self.data_key_list.into(),
-            cache,
-            memory_data: Rc::new(memory_data),
-            data_num: 0,
-            tx,
-            rx: Rc::new(rx),
+            sources: sources.into(),
+            cache: Cache::default(),
+            next_source: 0,
+            sender,
+            receiver: Rc::new(receiver),
+            loader: self.loader,
             parallel_load: self.parallel_load,
-            preprocessor: self.preprocessor.clone(),
+            preprocessor: self.preprocessor,
         })
     }
 }
 
-/// Provides `Data` reading based on the given sequence of data through `Cache`.
+/// Loads immutable chunks and shares them between independent reader cursors.
 #[derive(Clone)]
-pub struct Reader<D>
-where
-    D: NpyDTyped + Clone,
-{
-    data_key_list: Rc<[String]>,
+pub struct Reader<D> {
+    sources: Rc<[DataSource<D>]>,
     cache: Cache<D>,
-    // Unlike files, supplied memory buffers cannot be reloaded after cache eviction.
-    memory_data: Rc<HashMap<String, Data<D>>>,
-    data_num: usize,
-    tx: Sender<LoadDataResult<D>>,
-    rx: Rc<Receiver<LoadDataResult<D>>>,
+    next_source: usize,
+    sender: Sender<LoadResult<D>>,
+    receiver: Rc<Receiver<LoadResult<D>>>,
+    loader: LoadChunk<D>,
     parallel_load: bool,
-    preprocessor: Option<Arc<Box<dyn DataPreprocess<D> + Sync + Send + 'static>>>,
+    preprocessor: Option<Preprocessor<D>>,
 }
 
 impl<D> Reader<D>
 where
-    D: NpyDTyped + Clone + 'static,
+    D: Clone + Send + Sync + 'static,
 {
-    pub(crate) fn retain(&mut self, data: &Data<D>) {
-        self.cache.retain(data);
+    pub fn builder(loader: LoadChunk<D>) -> ReaderBuilder<D> {
+        ReaderBuilder::new(loader)
     }
 
-    /// Returns a [`ReaderBuilder`].
-    pub fn builder() -> ReaderBuilder<D> {
-        ReaderBuilder::default()
-    }
-
-    /// Releases this [`Data`] from the `Cache`. The `Cache` will delete the [`Data`] if there are
-    /// no readers accessing it.
-    pub fn release(&mut self, data: Data<D>) {
-        self.cache.remove(data);
-    }
-
-    /// Retrieves the next [`Data`] based on the order of your additions.
-    pub fn next_data(&mut self) -> Result<Data<D>, BacktestError> {
-        if self.data_num < self.data_key_list.len() {
-            let key = self.data_key_list.get(self.data_num).cloned().unwrap();
-            self.load_data(&key)?;
-
-            if self.parallel_load {
-                let next_key = self.data_key_list.get(self.data_num + 1).cloned();
-                if let Some(next_key) = next_key {
-                    self.load_data(&next_key)?;
+    pub fn next_data(&mut self) -> Result<Arc<Vec<D>>, BacktestError> {
+        if self.next_source >= self.sources.len() {
+            return Err(BacktestError::EndOfData);
+        }
+        let key = self.next_source;
+        loop {
+            self.load_data(key)?;
+            if self.parallel_load && key + 1 < self.sources.len() {
+                self.load_data(key + 1)?;
+            }
+            while self.cache.is_loading(key) {
+                let loaded = self
+                    .receiver
+                    .recv()
+                    .expect("loader sender should remain alive while reader is waiting");
+                match loaded.result {
+                    Ok(data) => self.cache.set(loaded.key, data),
+                    Err(error) => self.cache.fail(loaded.key, error),
                 }
             }
-
-            while !self.cache.is_ready(&key) {
-                match self.rx.recv().unwrap() {
-                    LoadDataResult {
-                        key,
-                        result: Ok(data),
-                    } => {
-                        self.cache.set(&key, data.unwrap());
-                    }
-                    LoadDataResult {
-                        key,
-                        result: Err(err),
-                    } => self.cache.fail(&key, err),
-                }
-            }
-
-            if let Some(error) = self.cache.error(&key) {
+            if let Some(error) = self.cache.error(key) {
+                let path = match &self.sources[key] {
+                    DataSource::File(path) => path.clone(),
+                    DataSource::Memory(_) => PathBuf::from("<memory>"),
+                };
                 return Err(BacktestError::DataError(IoError::new(
                     error.kind(),
                     FileLoadError {
-                        path: key,
+                        path,
                         source: error,
                     },
                 )));
             }
-
-            let data = self.cache.get(&key);
-            self.data_num += 1;
-            Ok(data)
-        } else {
-            Err(BacktestError::EndOfData)
+            if let Some(data) = self.cache.checkout(key) {
+                self.next_source += 1;
+                return Ok(data);
+            }
         }
     }
 
-    fn load_data(&mut self, key: &str) -> Result<(), BacktestError> {
-        if !self.cache.contains(key) {
-            if let Some(data) = self.memory_data.get(key) {
-                self.cache.insert(key.to_string(), data.clone());
-                return Ok(());
-            }
-            self.cache.prepare(key.to_string());
-
-            if key.ends_with(".npy") {
-                let tx = self.tx.clone();
-                let filepath = key.to_string();
+    fn load_data(&self, key: usize) -> Result<(), BacktestError> {
+        if !self.cache.needs_load(key) {
+            return Ok(());
+        }
+        match &self.sources[key] {
+            DataSource::Memory(data) => self.cache.set(key, data.clone()),
+            DataSource::File(path) => {
+                if path.extension() != Some(OsStr::new("npz")) {
+                    return Err(BacktestError::DataError(IoError::new(
+                        ErrorKind::InvalidInput,
+                        format!("unsupported data file extension: {}", path.display()),
+                    )));
+                }
+                self.cache.prepare(key);
+                let sender = self.sender.clone();
+                let path = path.clone();
+                let loader = self.loader;
                 let preprocessor = self.preprocessor.clone();
-
                 let _ = thread::spawn(move || {
-                    let load_data = |filepath: &str| {
-                        let mut data = read_npy_file::<D>(filepath)?;
-                        if let Some(preprocessor) = &preprocessor {
-                            preprocessor.preprocess(&mut data)?;
+                    let result = loader(&path).and_then(|mut data| {
+                        if let Some(preprocessor) = preprocessor {
+                            preprocessor(&mut data)?;
                         }
-                        Ok(data)
-                    };
-                    // SendError occurs only if Reader is already destroyed. Since no data is needed
-                    // once the Reader is destroyed, SendError is safely suppressed.
-                    match load_data(&filepath) {
-                        Ok(data) => {
-                            let _ = tx.send(LoadDataResult::ok(filepath, data));
-                        }
-                        Err(err) => {
-                            let _ = tx.send(LoadDataResult::err(filepath, err));
-                        }
-                    }
+                        Ok(Arc::new(data))
+                    });
+                    let _ = sender.send(LoadResult { key, result });
                 });
-            } else if key.ends_with(".npz") {
-                let tx = self.tx.clone();
-                let filepath = key.to_string();
-                let preprocessor = self.preprocessor.clone();
-
-                let _ = thread::spawn(move || {
-                    let load_data = |filepath: &str| {
-                        let mut data = read_npz_file::<D>(filepath, "data")?;
-                        if let Some(preprocessor) = &preprocessor {
-                            preprocessor.preprocess(&mut data)?;
-                        }
-                        Ok(data)
-                    };
-                    // SendError occurs only if Reader is already destroyed. Since no data is needed
-                    // once the Reader is destroyed, SendError is safely suppressed.
-                    match load_data(&filepath) {
-                        Ok(data) => {
-                            let _ = tx.send(LoadDataResult::ok(filepath, data));
-                        }
-                        Err(err) => {
-                            let _ = tx.send(LoadDataResult::err(filepath, err));
-                        }
-                    }
-                });
-            } else {
-                self.cache.fail(
-                    key,
-                    IoError::new(ErrorKind::InvalidData, "unsupported data type"),
-                );
             }
         }
         Ok(())
     }
 }
 
-/// `DataPreprocess` offers a function to preprocess data before it is fed into the backtesting.
-/// This feature is primarily introduced to adjust timestamps, making it particularly useful when
-/// backtesting the market from a location different from where your order latency was originally
-/// collected.
-///
-/// For example, if you're backtesting an arbitrage strategy between Binance Futures and ByBit,
-/// and your order latency data was collected in a colocated AWS region, you may need to adjust
-/// for the geographical difference. If your strategy is running with a base in Tokyo
-/// (where Binance Futures is located), you would need to account for the latency between
-/// Singapore (where ByBit is located) and Tokyo by applying an appropriate offset.
-pub trait DataPreprocess<D>
-where
-    D: POD + Clone,
-{
-    fn preprocess(&self, data: &mut Data<D>) -> Result<(), IoError>;
-}
-
-/// Pre-processes the feed data to adjust for latency. `local_ts` is offset by the specified latency
-/// offset.
-#[derive(Clone)]
-pub struct FeedLatencyAdjustment {
-    latency_offset: i64,
-}
-
-impl FeedLatencyAdjustment {
-    /// Constructs a `FeedLatencyAdjustment`.
-    pub fn new(latency_offset: i64) -> Self {
-        Self { latency_offset }
-    }
-}
-
-impl DataPreprocess<Event> for FeedLatencyAdjustment {
-    fn preprocess(&self, data: &mut Data<Event>) -> Result<(), IoError> {
-        for i in 0..data.len() {
-            data[i].local_ts += self.latency_offset;
-            if data[i].local_ts <= data[i].exch_ts {
-                return Err(IoError::new(
-                    ErrorKind::InvalidData,
-                    "`local_ts` became less than or \
-                    equal to `exch_ts` after applying the latency offset",
-                ));
-            }
+/// Applies a local timestamp offset before a feed chunk is published.
+pub fn adjust_feed_latency(data: &mut [Event], latency_offset: i64) -> io::Result<()> {
+    for event in data {
+        event.local_ts = event.local_ts.checked_add(latency_offset).ok_or_else(|| {
+            IoError::new(ErrorKind::InvalidData, "local timestamp offset overflow")
+        })?;
+        if event.local_ts <= event.exch_ts {
+            return Err(IoError::new(
+                ErrorKind::InvalidData,
+                "local timestamp must be greater than exchange timestamp after adjustment",
+            ));
         }
-        Ok(())
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct Row(i64);
+
+    static LOADS: AtomicUsize = AtomicUsize::new(0);
+
+    fn load_rows(_path: &Path) -> io::Result<Vec<Row>> {
+        LOADS.fetch_add(1, Ordering::Relaxed);
+        Ok(vec![Row(1), Row(2)])
+    }
+
+    #[test]
+    fn cloned_readers_share_published_chunks() {
+        LOADS.store(0, Ordering::Relaxed);
+        let reader = Reader::builder(load_rows)
+            .data(vec![DataSource::File(PathBuf::from("rows.npz"))])
+            .build()
+            .expect("reader should build");
+        let mut first = reader.clone();
+        let mut second = reader;
+        let first_data = first.next_data().expect("first reader should load");
+        let second_data = second.next_data().expect("second reader should share");
+        assert!(Arc::ptr_eq(&first_data, &second_data));
+        assert_eq!(LOADS.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn preprocesses_memory_before_publishing() {
+        let mut reader = Reader::builder(load_rows)
+            .data(vec![vec![Row(1), Row(2)].into()])
+            .preprocess(|rows| {
+                for row in rows {
+                    row.0 += 1;
+                }
+                Ok(())
+            })
+            .build()
+            .expect("reader should build");
+        assert_eq!(
+            reader
+                .next_data()
+                .expect("memory data should be available")
+                .as_slice(),
+            [Row(2), Row(3)]
+        );
     }
 }

@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
   "hftbacktest",
-  "hftbacktest-derive",
   "py-hftbacktest",
 ]
 

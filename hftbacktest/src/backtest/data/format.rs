@@ -4,95 +4,105 @@ use std::{
     path::Path,
 };
 
-use hftbacktest_derive::NpyDTyped;
+use npyz::DType;
+use rust_decimal::Decimal;
 use tempfile::NamedTempFile;
 use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
 
-use crate::backtest::data::{
-    Data, POD,
-    fixed::DATA_SCALE,
-    npy::{read_npy, write_npy},
+use crate::{
+    backtest::data::{
+        fixed::DATA_SCALE,
+        npy::{read_array, write_array},
+    },
+    types::Event,
 };
 
-/// On-disk event. Prices and quantities are signed integers at DATA_SCALE.
-#[repr(C, align(64))]
-#[derive(Clone, Debug, PartialEq, NpyDTyped)]
+/// On-disk event. Prices and quantities are signed integers at [`DATA_SCALE`].
+#[derive(Clone, Debug, PartialEq, Eq, npyz::Serialize, npyz::Deserialize)]
 pub struct StoredEvent {
     pub ev: u64,
     pub exch_ts: i64,
     pub local_ts: i64,
     pub px: i64,
     pub qty: i64,
-    pub order_id: u64,
-    pub ival: i64,
-    pub fval: f64,
 }
 
-// All fields are primitive values and the 64-byte record has no padding.
-unsafe impl POD for StoredEvent {}
-
-#[repr(C)]
-#[derive(Clone, Debug, PartialEq, Eq, NpyDTyped)]
-pub struct MarketDataMetadata {
-    pub format_version: u32,
-    pub price_scale: u32,
-    pub size_scale: u32,
+#[derive(Clone, Debug, PartialEq, Eq, npyz::Serialize, npyz::Deserialize)]
+struct MarketDataMetadata {
+    price_scale: u32,
+    size_scale: u32,
 }
-
-unsafe impl POD for MarketDataMetadata {}
 
 impl MarketDataMetadata {
-    pub const CURRENT: Self = Self {
-        format_version: 1,
+    const CURRENT: Self = Self {
         price_scale: DATA_SCALE,
         size_scale: DATA_SCALE,
     };
 }
 
-fn read_array<R: Read + Seek, D: crate::backtest::data::NpyDTyped + Clone>(
+fn stored_event_dtype() -> DType {
+    DType::parse(
+        "[('ev', '<u8'), ('exch_ts', '<i8'), ('local_ts', '<i8'), ('px', '<i8'), ('qty', '<i8')]",
+    )
+    .expect("stored event dtype should be valid")
+}
+
+fn metadata_dtype() -> DType {
+    DType::parse("[('price_scale', '<u4'), ('size_scale', '<u4')]")
+        .expect("market data metadata dtype should be valid")
+}
+
+fn read_zip_array<R, T>(
     archive: &mut ZipArchive<R>,
     name: &str,
-) -> io::Result<Data<D>> {
+    dtype: &DType,
+) -> io::Result<Vec<T>>
+where
+    R: Read + Seek,
+    T: npyz::Deserialize,
+{
     let mut file = archive.by_name(name)?;
-    let size = usize::try_from(file.size()).map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidData, "array exceeds addressable size")
-    })?;
-    read_npy(&mut file, size)
+    let size = file.size();
+    read_array(&mut file, size, dtype)
 }
 
-pub fn read_market_data<R: Read + Seek>(reader: R) -> io::Result<Data<StoredEvent>> {
-    if !cfg!(target_endian = "little") {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "market data requires a little-endian host",
-        ));
-    }
+fn read_stored_events<R: Read + Seek>(reader: R) -> io::Result<Vec<StoredEvent>> {
     let mut archive = ZipArchive::new(reader)?;
-    let metadata: Data<MarketDataMetadata> = read_array(&mut archive, "metadata.npy")?;
-    if metadata.len() != 1 || metadata[0] != MarketDataMetadata::CURRENT {
+    let metadata: Vec<MarketDataMetadata> =
+        read_zip_array(&mut archive, "metadata.npy", &metadata_dtype())?;
+    if metadata.as_slice() != [MarketDataMetadata::CURRENT] {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "unsupported market data metadata",
+            "unsupported market data scale metadata",
         ));
     }
-    read_array(&mut archive, "data.npy")
+    read_zip_array(&mut archive, "data.npy", &stored_event_dtype())
 }
 
-pub fn read_market_data_file(path: &Path) -> io::Result<Data<StoredEvent>> {
+pub fn read_market_data<R: Read + Seek>(reader: R) -> io::Result<Vec<Event>> {
+    read_stored_events(reader).map(|events| {
+        events
+            .into_iter()
+            .map(|event| Event {
+                ev: event.ev,
+                exch_ts: event.exch_ts,
+                local_ts: event.local_ts,
+                px: Decimal::from_i128_with_scale(i128::from(event.px), DATA_SCALE),
+                qty: Decimal::from_i128_with_scale(i128::from(event.qty), DATA_SCALE),
+            })
+            .collect()
+    })
+}
+
+pub fn read_market_data_file(path: &Path) -> io::Result<Vec<Event>> {
     read_market_data(File::open(path)?)
 }
 
 /// Publishes a complete NPZ atomically; errors leave any existing destination intact.
 pub fn write_market_data_file(path: &Path, events: &[StoredEvent]) -> io::Result<()> {
-    if !cfg!(target_endian = "little") {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "market data requires a little-endian host",
-        ));
-    }
     let parent = path
         .parent()
-        .filter(|p| !p.as_os_str().is_empty())
+        .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     let mut temporary = NamedTempFile::new_in(parent)?;
     {
@@ -100,9 +110,13 @@ pub fn write_market_data_file(path: &Path, events: &[StoredEvent]) -> io::Result
         let options =
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
         archive.start_file("metadata.npy", options)?;
-        write_npy(&mut archive, &[MarketDataMetadata::CURRENT])?;
+        write_array(
+            &mut archive,
+            &[MarketDataMetadata::CURRENT],
+            metadata_dtype(),
+        )?;
         archive.start_file("data.npy", options)?;
-        write_npy(&mut archive, events)?;
+        write_array(&mut archive, events, stored_event_dtype())?;
         archive.finish()?;
     }
     temporary.as_file().sync_all()?;
@@ -112,54 +126,36 @@ pub fn write_market_data_file(path: &Path, events: &[StoredEvent]) -> io::Result
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn rejects_truncated_payload_and_dtype_mismatch() {
-        let events = [StoredEvent {
-            ev: 1,
-            exch_ts: 2,
-            local_ts: 3,
-            px: 4,
-            qty: 5,
-            order_id: 0,
-            ival: 0,
-            fval: 0.0,
-        }];
-        let mut bytes = Vec::new();
-        write_npy(&mut bytes, &events).expect("valid events should serialize");
-        let size = bytes.len();
-        assert!(read_npy::<_, StoredEvent>(&mut Cursor::new(&bytes[..size - 1]), size).is_err());
-        assert!(
-            read_npy::<_, StoredEvent>(&mut Cursor::new(&bytes[..size - 1]), size - 1).is_err()
-        );
-        let dtype = bytes
-            .windows(13)
-            .position(|window| window == b"('px', '<i8')")
-            .expect("price dtype should be in header");
-        bytes[dtype + 9] = b'f';
-        assert!(read_npy::<_, StoredEvent>(&mut Cursor::new(bytes), size).is_err());
-    }
     use std::io::Cursor;
 
-    #[test]
-    fn exact_event_roundtrip() {
-        let directory = tempfile::tempdir().expect("temporary directory should be created");
-        let path = directory.path().join("events.npz");
-        let events = [StoredEvent {
+    use super::*;
+
+    fn stored_event() -> StoredEvent {
+        StoredEvent {
             ev: 1,
             exch_ts: 2,
             local_ts: 3,
             px: i64::MAX,
             qty: 1,
-            order_id: 0,
-            ival: 0,
-            fval: 0.0,
-        }];
-        write_market_data_file(&path, &events).expect("valid events should serialize");
+        }
+    }
+
+    #[test]
+    fn exact_event_roundtrip() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        let path = directory.path().join("events.npz");
+        write_market_data_file(&path, &[stored_event()]).expect("valid events should serialize");
         let loaded = read_market_data_file(&path).expect("valid archive should load");
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0], events[0]);
+        assert_eq!(
+            loaded,
+            [Event {
+                ev: 1,
+                exch_ts: 2,
+                local_ts: 3,
+                px: Decimal::from_i128_with_scale(i128::from(i64::MAX), DATA_SCALE),
+                qty: Decimal::from_i128_with_scale(1, DATA_SCALE),
+            }]
+        );
     }
 
     #[test]
@@ -179,13 +175,7 @@ mod tests {
         for metadata in [
             None,
             Some(MarketDataMetadata {
-                format_version: 1,
                 price_scale: 9,
-                size_scale: 8,
-            }),
-            Some(MarketDataMetadata {
-                format_version: 2,
-                price_scale: 8,
                 size_scale: 8,
             }),
         ] {
@@ -194,14 +184,45 @@ mod tests {
                 writer
                     .start_file("metadata.npy", SimpleFileOptions::default())
                     .expect("entry should open");
-                write_npy(&mut writer, &[metadata]).expect("metadata should serialize");
+                write_array(&mut writer, &[metadata], metadata_dtype())
+                    .expect("metadata should serialize");
             }
             writer
                 .start_file("data.npy", SimpleFileOptions::default())
                 .expect("entry should open");
-            write_npy::<_, StoredEvent>(&mut writer, &[]).expect("empty array should serialize");
+            write_array::<_, StoredEvent>(&mut writer, &[], stored_event_dtype())
+                .expect("empty array should serialize");
             let bytes = writer.finish().expect("archive should finish").into_inner();
             assert!(read_market_data(Cursor::new(bytes)).is_err());
         }
+    }
+
+    #[test]
+    fn rejects_trailing_payload_and_dtype_mismatch() {
+        let mut bytes = Vec::new();
+        write_array(&mut bytes, &[stored_event()], stored_event_dtype())
+            .expect("valid events should serialize");
+        bytes.push(0);
+        assert!(
+            read_array::<_, StoredEvent>(
+                Cursor::new(&bytes),
+                bytes.len() as u64,
+                &stored_event_dtype()
+            )
+            .is_err()
+        );
+
+        let wrong_dtype = DType::parse(
+            "[('ev', '<u8'), ('exch_ts', '<i8'), ('local_ts', '<i8'), ('px', '<f8'), ('qty', '<i8')]",
+        )
+        .expect("test dtype should be valid");
+        assert!(
+            read_array::<_, StoredEvent>(
+                Cursor::new(&bytes[..bytes.len() - 1]),
+                (bytes.len() - 1) as u64,
+                &wrong_dtype
+            )
+            .is_err()
+        );
     }
 }

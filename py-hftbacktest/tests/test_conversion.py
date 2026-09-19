@@ -49,9 +49,10 @@ class ConversionTests(unittest.TestCase):
         count = self.convert()
         with np.load(self.output, allow_pickle=False) as archive:
             self.assertEqual(set(archive.files), {"data", "metadata"})
-            self.assertEqual(archive["metadata"].tolist(), [(1, 8, 8)])
+            self.assertEqual(archive["metadata"].tolist(), [(8, 8)])
             data = archive["data"]
             self.assertEqual(len(data), count)
+            self.assertEqual(data.dtype.names, ("ev", "exch_ts", "local_ts", "px", "qty"))
             self.assertEqual(data.dtype["px"], np.dtype("<i8"))
             self.assertEqual(data.dtype["qty"], np.dtype("<i8"))
             self.assertIn(np.iinfo(np.int64).max, data["px"])

@@ -41,9 +41,6 @@ classifiers = [
 [project.urls]
 Repository = "https://github.com/nkaz001/hftbacktest"
 
-[project.optional-dependencies]
-databento = ["databento"]
-
 [tool.maturin]
 include = [{ path = "rust-toolchain.toml", format = "sdist" }]
 module-name = "hftbacktest._hftbacktest"

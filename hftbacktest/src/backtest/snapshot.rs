@@ -116,16 +116,55 @@ impl<MD: MarketDepth> Backtest<MD> {
 
 impl<P: Processor> BacktestProcessorState<P> {
     fn snapshot_with<Q: Processor>(&self, processor: Q) -> BacktestProcessorState<Q> {
-        let mut reader = self.reader.clone();
-        reader.retain(&self.data);
         BacktestProcessorState {
             data: self.data.clone(),
             processor,
-            reader,
+            reader: self.reader.clone(),
             row: self.row,
         }
     }
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use rust_decimal::Decimal;
+
+    use super::*;
+    use crate::backtest::{
+        L2AssetBuilder,
+        rules::{TickSizeChange, TickSizeSchedule},
+    };
+
+    #[test]
+    fn snapshot_restore_keeps_standard_reader_state_shareable() {
+        type Fees = TradingValueFeeModel<CommonFees>;
+        let schedule = TickSizeSchedule::new(vec![TickSizeChange {
+            effective_from: 0,
+            tick_size: Decimal::new(1, 2),
+        }])
+        .unwrap();
+        let asset = L2AssetBuilder::<
+            ConstantLatency,
+            LinearAsset,
+            RiskAdverseQueueModel<BTreeMarketDepth>,
+            BTreeMarketDepth,
+            Fees,
+        >::new()
+        .data(Vec::new())
+        .latency_model(ConstantLatency::new(0, 0))
+        .asset_type(LinearAsset::new(1.0))
+        .fee_model(TradingValueFeeModel::new(CommonFees::new(0.0, 0.0)))
+        .queue_model(RiskAdverseQueueModel::new())
+        .depth(BTreeMarketDepth::new)
+        .tick_size_schedule(schedule)
+        .build_snapshotable()
+        .unwrap();
+        let backtest = Backtest::<BTreeMarketDepth>::builder()
+            .add_asset(asset)
+            .build()
+            .unwrap();
+        let snapshot = backtest.snapshot().unwrap();
+        let restored = snapshot.restore().unwrap();
+        assert_eq!(snapshot.timestamp(), restored.cur_ts);
+    }
+}

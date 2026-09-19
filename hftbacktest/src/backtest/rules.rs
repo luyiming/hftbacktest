@@ -56,6 +56,12 @@ impl TickSizeSchedule {
         }
         Ok(self.changes[index - 1].tick_size)
     }
+
+    /// Returns whether `price` is aligned to the rule active at exchange processing time.
+    pub fn accepts(&self, timestamp: i64, price: Decimal) -> Result<bool, TickSizeError> {
+        let tick_size = self.at(timestamp)?;
+        Ok((price % tick_size).is_zero())
+    }
 }
 
 #[cfg(test)]
@@ -86,6 +92,8 @@ mod tests {
         assert_eq!(schedule.at(19), Ok(Decimal::new(1, 2)));
         assert_eq!(schedule.at(20), Ok(Decimal::new(1, 1)));
         assert_eq!(schedule.at(i64::MAX), Ok(Decimal::new(1, 1)));
+        assert_eq!(schedule.accepts(10, Decimal::new(123, 2)), Ok(true));
+        assert_eq!(schedule.accepts(20, Decimal::new(123, 2)), Ok(false));
     }
 
     #[test]

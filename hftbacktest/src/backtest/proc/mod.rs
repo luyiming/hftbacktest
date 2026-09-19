@@ -3,18 +3,12 @@ mod nopartialfillexchange;
 mod partialfillexchange;
 mod price_match;
 
+use rust_decimal::Decimal;
 use std::collections::HashMap;
 
 pub use local::Local;
 pub use nopartialfillexchange::NoPartialFillExchange;
 pub use partialfillexchange::PartialFillExchange;
-
-mod l3_local;
-
-mod l3_nopartialfillexchange;
-
-pub use l3_local::L3Local;
-pub use l3_nopartialfillexchange::L3NoPartialFillExchange;
 
 use crate::{
     backtest::{
@@ -56,9 +50,9 @@ where
         &mut self,
         order_id: OrderId,
         side: Side,
-        price: f64,
+        price: Decimal,
         price_match: PriceMatch,
-        qty: f64,
+        qty: Decimal,
         order_type: OrdType,
         time_in_force: TimeInForce,
         current_timestamp: i64,
@@ -75,9 +69,9 @@ where
     fn modify(
         &mut self,
         order_id: OrderId,
-        price: f64,
+        price: Decimal,
         price_match: PriceMatch,
-        qty: f64,
+        qty: Decimal,
         current_timestamp: i64,
     ) -> Result<(), BacktestError>;
 
@@ -93,7 +87,7 @@ where
     fn clear_inactive_orders(&mut self);
 
     /// Returns the position you currently hold.
-    fn position(&self) -> f64;
+    fn position(&self) -> Decimal;
 
     /// Returns the state's values such as balance, fee, and so on.
     fn state_values(&self) -> &StateValues;
