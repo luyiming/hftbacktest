@@ -32,27 +32,30 @@ impl BTreeMarketDepth {
         self.best_ask = self.ask_depth.first_key_value().map(|(&price, _)| price);
     }
 
-    fn discard_crossed_asks(&mut self) {
+    fn remove_crossed_asks(&mut self) {
         if let Some(best_bid) = self.best_bid {
-            self.best_ask = self
+            while self
                 .ask_depth
-                .range((
-                    std::ops::Bound::Excluded(best_bid),
-                    std::ops::Bound::Unbounded,
-                ))
-                .next()
-                .map(|(&price, _)| price);
+                .first_key_value()
+                .is_some_and(|(&price, _)| price <= best_bid)
+            {
+                let _ = self.ask_depth.pop_first();
+            }
         }
+        self.refresh_best_ask();
     }
 
-    fn discard_crossed_bids(&mut self) {
+    fn remove_crossed_bids(&mut self) {
         if let Some(best_ask) = self.best_ask {
-            self.best_bid = self
+            while self
                 .bid_depth
-                .range(..best_ask)
-                .next_back()
-                .map(|(&price, _)| price);
+                .last_key_value()
+                .is_some_and(|(&price, _)| price >= best_ask)
+            {
+                let _ = self.bid_depth.pop_last();
+            }
         }
+        self.refresh_best_bid();
     }
 }
 
@@ -66,7 +69,7 @@ impl L2MarketDepth for BTreeMarketDepth {
             self.bid_depth.insert(price, qty);
         }
         self.refresh_best_bid();
-        self.discard_crossed_asks();
+        self.remove_crossed_asks();
         self.timestamp = timestamp;
         (
             price,
@@ -87,7 +90,7 @@ impl L2MarketDepth for BTreeMarketDepth {
             self.ask_depth.insert(price, qty);
         }
         self.refresh_best_ask();
-        self.discard_crossed_bids();
+        self.remove_crossed_bids();
         self.timestamp = timestamp;
         (
             price,
@@ -237,5 +240,181 @@ mod tests {
         depth.update_ask_depth(dec(150, 0), dec(1, 0), 0);
         depth.clear_depth(Side::Sell, Some(dec(120, 0)));
         assert_eq!(depth.best_ask(), Some(dec(150, 0)));
+    }
+
+    #[test]
+    fn crossed_bid_removes_asks_at_and_below_it_without_resurrection() {
+        let mut depth = BTreeMarketDepth::new();
+        depth.update_bid_depth(dec(100, 0), Decimal::ONE, 1);
+        for price in [101, 102, 105] {
+            depth.update_ask_depth(dec(price, 0), Decimal::ONE, 1);
+        }
+
+        depth.update_bid_depth(dec(102, 0), Decimal::ONE, 2);
+        assert_eq!(
+            depth.ask_depth,
+            [(dec(105, 0), Decimal::ONE)].into_iter().collect()
+        );
+        assert_eq!(
+            (depth.best_bid(), depth.best_ask()),
+            (Some(dec(102, 0)), Some(dec(105, 0)))
+        );
+
+        depth.update_ask_depth(dec(106, 0), Decimal::ONE, 3);
+        depth.clear_depth(Side::Buy, Some(dec(103, 0)));
+        assert_eq!(
+            (depth.best_bid(), depth.best_ask()),
+            (Some(dec(102, 0)), Some(dec(105, 0)))
+        );
+
+        depth.update_bid_depth(dec(102, 0), Decimal::ZERO, 4);
+        assert_eq!(
+            (depth.best_bid(), depth.best_ask()),
+            (Some(dec(100, 0)), Some(dec(105, 0)))
+        );
+        assert_eq!(depth.ask_qty_at_price(dec(101, 0)), Decimal::ZERO);
+        assert_eq!(depth.ask_qty_at_price(dec(102, 0)), Decimal::ZERO);
+    }
+
+    #[test]
+    fn crossed_ask_removes_bids_at_and_above_it_without_resurrection() {
+        let mut depth = BTreeMarketDepth::new();
+        for price in [95, 98, 100] {
+            depth.update_bid_depth(dec(price, 0), Decimal::ONE, 1);
+        }
+        depth.update_ask_depth(dec(105, 0), Decimal::ONE, 1);
+
+        depth.update_ask_depth(dec(98, 0), Decimal::ONE, 2);
+        assert_eq!(
+            depth.bid_depth,
+            [(dec(95, 0), Decimal::ONE)].into_iter().collect()
+        );
+        assert_eq!(
+            (depth.best_bid(), depth.best_ask()),
+            (Some(dec(95, 0)), Some(dec(98, 0)))
+        );
+
+        depth.update_bid_depth(dec(96, 0), Decimal::ONE, 3);
+        depth.clear_depth(Side::Sell, Some(dec(97, 0)));
+        assert_eq!(
+            (depth.best_bid(), depth.best_ask()),
+            (Some(dec(96, 0)), Some(dec(98, 0)))
+        );
+
+        depth.update_ask_depth(dec(98, 0), Decimal::ZERO, 4);
+        assert_eq!(
+            (depth.best_bid(), depth.best_ask()),
+            (Some(dec(96, 0)), Some(dec(105, 0)))
+        );
+        assert_eq!(depth.bid_qty_at_price(dec(98, 0)), Decimal::ZERO);
+        assert_eq!(depth.bid_qty_at_price(dec(100, 0)), Decimal::ZERO);
+    }
+
+    #[test]
+    fn effective_clears_after_crossed_bid_keep_removed_asks_absent() {
+        let mut depth = BTreeMarketDepth::new();
+        depth.update_bid_depth(dec(100, 0), Decimal::ONE, 1);
+        for price in [101, 105, 106] {
+            depth.update_ask_depth(dec(price, 0), Decimal::ONE, 1);
+        }
+        depth.update_bid_depth(dec(102, 0), Decimal::ONE, 2);
+
+        depth.clear_depth(Side::Buy, Some(dec(102, 0)));
+        assert_eq!(
+            (depth.best_bid(), depth.best_ask()),
+            (Some(dec(100, 0)), Some(dec(105, 0)))
+        );
+        assert_eq!(depth.bid_qty_at_price(dec(102, 0)), Decimal::ZERO);
+        assert_eq!(depth.ask_qty_at_price(dec(101, 0)), Decimal::ZERO);
+
+        depth.clear_depth(Side::Sell, Some(dec(105, 0)));
+        assert_eq!(
+            (depth.best_bid(), depth.best_ask()),
+            (Some(dec(100, 0)), Some(dec(106, 0)))
+        );
+        assert_eq!(depth.ask_qty_at_price(dec(105, 0)), Decimal::ZERO);
+
+        depth.clear_depth(Side::Buy, None);
+        assert_eq!(
+            (depth.best_bid(), depth.best_ask()),
+            (None, Some(dec(106, 0)))
+        );
+        assert_eq!(depth.ask_qty_at_price(dec(101, 0)), Decimal::ZERO);
+    }
+
+    #[test]
+    fn effective_clears_after_crossed_ask_keep_removed_bids_absent() {
+        let mut depth = BTreeMarketDepth::new();
+        for price in [94, 95, 98, 100] {
+            depth.update_bid_depth(dec(price, 0), Decimal::ONE, 1);
+        }
+        depth.update_ask_depth(dec(105, 0), Decimal::ONE, 1);
+        depth.update_ask_depth(dec(98, 0), Decimal::ONE, 2);
+
+        depth.clear_depth(Side::Sell, Some(dec(98, 0)));
+        assert_eq!(
+            (depth.best_bid(), depth.best_ask()),
+            (Some(dec(95, 0)), Some(dec(105, 0)))
+        );
+        assert_eq!(depth.ask_qty_at_price(dec(98, 0)), Decimal::ZERO);
+        assert_eq!(depth.bid_qty_at_price(dec(100, 0)), Decimal::ZERO);
+
+        depth.clear_depth(Side::Buy, Some(dec(95, 0)));
+        assert_eq!(
+            (depth.best_bid(), depth.best_ask()),
+            (Some(dec(94, 0)), Some(dec(105, 0)))
+        );
+        assert_eq!(depth.bid_qty_at_price(dec(95, 0)), Decimal::ZERO);
+
+        depth.clear_depth(Side::Sell, None);
+        assert_eq!(
+            (depth.best_bid(), depth.best_ask()),
+            (Some(dec(94, 0)), None)
+        );
+        assert_eq!(depth.bid_qty_at_price(dec(100, 0)), Decimal::ZERO);
+    }
+
+    #[test]
+    fn removing_last_crossing_bid_does_not_restore_cleared_ask() {
+        let mut depth = BTreeMarketDepth::new();
+        depth.update_ask_depth(dec(101, 0), Decimal::ONE, 1);
+        depth.update_bid_depth(dec(102, 0), Decimal::ONE, 2);
+        assert!(depth.ask_depth.is_empty());
+        assert_eq!(depth.best_ask(), None);
+
+        depth.update_bid_depth(dec(102, 0), Decimal::ZERO, 3);
+        assert_eq!((depth.best_bid(), depth.best_ask()), (None, None));
+        depth.update_ask_depth(dec(105, 0), Decimal::ONE, 4);
+        assert_eq!(depth.best_ask(), Some(dec(105, 0)));
+    }
+
+    #[test]
+    fn equal_decimal_prices_clear_only_the_crossed_level() {
+        let mut depth = BTreeMarketDepth::new();
+        let crossed = dec(100005, 3);
+        let next_ask = dec(100006, 3);
+        depth.update_ask_depth(crossed, Decimal::ONE, 1);
+        depth.update_ask_depth(next_ask, Decimal::ONE, 1);
+
+        depth.update_bid_depth(dec(1000050, 4), Decimal::ONE, 2);
+        assert_eq!(depth.ask_qty_at_price(crossed), Decimal::ZERO);
+        assert_eq!(depth.best_ask(), Some(next_ask));
+        assert_eq!(depth.ask_qty_at_price(next_ask), Decimal::ONE);
+    }
+
+    #[test]
+    fn zero_quantity_updates_do_not_clear_the_opposite_side() {
+        let mut depth = BTreeMarketDepth::new();
+        depth.update_bid_depth(dec(100, 0), Decimal::ONE, 1);
+        depth.update_ask_depth(dec(101, 0), Decimal::ONE, 1);
+
+        depth.update_bid_depth(dec(102, 0), Decimal::ZERO, 2);
+        depth.update_ask_depth(dec(99, 0), Decimal::ZERO, 3);
+        assert_eq!(
+            (depth.best_bid(), depth.best_ask()),
+            (Some(dec(100, 0)), Some(dec(101, 0)))
+        );
+        assert_eq!(depth.bid_qty_at_price(dec(100, 0)), Decimal::ONE);
+        assert_eq!(depth.ask_qty_at_price(dec(101, 0)), Decimal::ONE);
     }
 }
