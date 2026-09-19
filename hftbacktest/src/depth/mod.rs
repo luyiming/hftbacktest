@@ -25,14 +25,16 @@ pub trait MarketDepth {
         F: FnMut(Decimal, Decimal) -> bool;
 }
 
-pub type DepthUpdate = (
-    Decimal,
-    Option<Decimal>,
-    Option<Decimal>,
-    Decimal,
-    Decimal,
-    i64,
-);
+/// Result of updating one price level on one side of the book.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DepthUpdate {
+    pub level_price: Decimal,
+    pub previous_best_price: Option<Decimal>,
+    pub best_price: Option<Decimal>,
+    pub previous_qty: Decimal,
+    pub new_qty: Decimal,
+    pub timestamp: i64,
+}
 
 pub trait L2MarketDepth {
     fn update_bid_depth(&mut self, price: Decimal, qty: Decimal, timestamp: i64) -> DepthUpdate;

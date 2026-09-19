@@ -307,19 +307,16 @@ where
 
     fn on_best_bid_update(
         &mut self,
-        _prev_best_price: Option<Decimal>,
-        new_best_price: Option<Decimal>,
+        new_best_price: Decimal,
         timestamp: i64,
     ) -> Result<(), BacktestError> {
         {
             let orders = self.orders.clone();
             let mut orders_borrowed = orders.borrow_mut();
-            if let Some(new_best_price) = new_best_price {
-                for order in orders_borrowed.values_mut() {
-                    if order.side == Side::Sell && order.price <= new_best_price {
-                        self.filled_orders.push(order.order_id);
-                        self.fill::<true>(order, timestamp, true, order.price, order.leaves_qty)?;
-                    }
+            for order in orders_borrowed.values_mut() {
+                if order.side == Side::Sell && order.price <= new_best_price {
+                    self.filled_orders.push(order.order_id);
+                    self.fill::<true>(order, timestamp, true, order.price, order.leaves_qty)?;
                 }
             }
         }
@@ -329,19 +326,16 @@ where
 
     fn on_best_ask_update(
         &mut self,
-        _prev_best_price: Option<Decimal>,
-        new_best_price: Option<Decimal>,
+        new_best_price: Decimal,
         timestamp: i64,
     ) -> Result<(), BacktestError> {
         {
             let orders = self.orders.clone();
             let mut orders_borrowed = orders.borrow_mut();
-            if let Some(new_best_price) = new_best_price {
-                for order in orders_borrowed.values_mut() {
-                    if order.side == Side::Buy && order.price >= new_best_price {
-                        self.filled_orders.push(order.order_id);
-                        self.fill::<true>(order, timestamp, true, order.price, order.leaves_qty)?;
-                    }
+            for order in orders_borrowed.values_mut() {
+                if order.side == Side::Buy && order.price >= new_best_price {
+                    self.filled_orders.push(order.order_id);
+                    self.fill::<true>(order, timestamp, true, order.price, order.leaves_qty)?;
                 }
             }
         }
@@ -596,23 +590,31 @@ where
             self.depth.clear_depth(Side::Buy, None);
             self.depth.clear_depth(Side::Sell, None);
         } else if event.is(EXCH_BID_DEPTH_EVENT) || event.is(EXCH_BID_DEPTH_SNAPSHOT_EVENT) {
-            let (price, prev_best_bid, best_bid, prev_qty, new_qty, timestamp) = self
+            let update = self
                 .depth
                 .update_bid_depth(event.px, event.qty, event.exch_ts);
-            self.on_bid_qty_chg(price, prev_qty, new_qty);
-            if best_bid > prev_best_bid {
-                self.on_best_bid_update(prev_best_bid, best_bid, timestamp)?;
+            self.on_bid_qty_chg(update.level_price, update.previous_qty, update.new_qty);
+            if let Some(best_bid) = update.best_price
+                && update
+                    .previous_best_price
+                    .is_none_or(|previous| best_bid > previous)
+            {
+                self.on_best_bid_update(best_bid, update.timestamp)?;
             }
             if event.is(EXCH_BID_DEPTH_SNAPSHOT_EVENT) {
                 self.depth.mark_depth_ready();
             }
         } else if event.is(EXCH_ASK_DEPTH_EVENT) || event.is(EXCH_ASK_DEPTH_SNAPSHOT_EVENT) {
-            let (price, prev_best_ask, best_ask, prev_qty, new_qty, timestamp) = self
+            let update = self
                 .depth
                 .update_ask_depth(event.px, event.qty, event.exch_ts);
-            self.on_ask_qty_chg(price, prev_qty, new_qty);
-            if best_ask < prev_best_ask {
-                self.on_best_ask_update(prev_best_ask, best_ask, timestamp)?;
+            self.on_ask_qty_chg(update.level_price, update.previous_qty, update.new_qty);
+            if let Some(best_ask) = update.best_price
+                && update
+                    .previous_best_price
+                    .is_none_or(|previous| best_ask < previous)
+            {
+                self.on_best_ask_update(best_ask, update.timestamp)?;
             }
             if event.is(EXCH_ASK_DEPTH_SNAPSHOT_EVENT) {
                 self.depth.mark_depth_ready();
@@ -687,5 +689,102 @@ where
         self.order_e2l
             .earliest_send_order_timestamp()
             .unwrap_or(i64::MAX)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rust_decimal::Decimal;
+
+    use super::*;
+    use crate::{
+        backtest::{
+            assettype::LinearAsset,
+            models::{CommonFees, ConstantLatency, RiskAdverseQueueModel, TradingValueFeeModel},
+            order::order_bus,
+            rules::{TickSizeChange, TickSizeSchedule},
+        },
+        depth::BTreeMarketDepth,
+    };
+
+    fn exchange() -> PartialFillExchange<
+        LinearAsset,
+        ConstantLatency,
+        RiskAdverseQueueModel<BTreeMarketDepth>,
+        BTreeMarketDepth,
+        TradingValueFeeModel<CommonFees>,
+    > {
+        let (order_e2l, _) = order_bus(ConstantLatency::new(0, 0));
+        let schedule = TickSizeSchedule::new(vec![TickSizeChange {
+            effective_from: 0,
+            tick_size: Decimal::ONE,
+        }])
+        .unwrap();
+        PartialFillExchange::new(
+            BTreeMarketDepth::new(),
+            State::new(
+                LinearAsset::new(1.0),
+                TradingValueFeeModel::new(CommonFees::new(0.0, 0.0)),
+            ),
+            RiskAdverseQueueModel::new(),
+            order_e2l,
+            schedule,
+        )
+    }
+
+    #[test]
+    fn first_ask_fills_crossing_buy_order() {
+        let mut exchange = exchange();
+        let mut order = Order::new(
+            1,
+            Decimal::from(100),
+            Decimal::ONE,
+            Side::Buy,
+            OrdType::Limit,
+            TimeInForce::GTC,
+        );
+        exchange.ack_new(&mut order, 0).unwrap();
+        assert_eq!(order.status, Status::New);
+
+        exchange
+            .process(&Event {
+                ev: EXCH_ASK_DEPTH_EVENT,
+                exch_ts: 1,
+                local_ts: 2,
+                px: Decimal::from(99),
+                qty: Decimal::ONE,
+            })
+            .unwrap();
+
+        assert!(exchange.orders.borrow().is_empty());
+        assert_eq!(exchange.state.values().position, Decimal::ONE);
+    }
+
+    #[test]
+    fn first_bid_fills_crossing_sell_order() {
+        let mut exchange = exchange();
+        let mut order = Order::new(
+            1,
+            Decimal::from(99),
+            Decimal::ONE,
+            Side::Sell,
+            OrdType::Limit,
+            TimeInForce::GTC,
+        );
+        exchange.ack_new(&mut order, 0).unwrap();
+        assert_eq!(order.status, Status::New);
+
+        exchange
+            .process(&Event {
+                ev: EXCH_BID_DEPTH_EVENT,
+                exch_ts: 1,
+                local_ts: 2,
+                px: Decimal::from(100),
+                qty: Decimal::ONE,
+            })
+            .unwrap();
+
+        assert!(exchange.orders.borrow().is_empty());
+        assert_eq!(exchange.state.values().position, -Decimal::ONE);
     }
 }

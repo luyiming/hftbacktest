@@ -71,14 +71,14 @@ impl L2MarketDepth for BTreeMarketDepth {
         self.refresh_best_bid();
         self.remove_crossed_asks();
         self.timestamp = timestamp;
-        (
-            price,
-            previous_best,
-            self.best_bid,
+        DepthUpdate {
+            level_price: price,
+            previous_best_price: previous_best,
+            best_price: self.best_bid,
             previous_qty,
-            qty,
+            new_qty: qty,
             timestamp,
-        )
+        }
     }
 
     fn update_ask_depth(&mut self, price: Decimal, qty: Decimal, timestamp: i64) -> DepthUpdate {
@@ -92,14 +92,14 @@ impl L2MarketDepth for BTreeMarketDepth {
         self.refresh_best_ask();
         self.remove_crossed_bids();
         self.timestamp = timestamp;
-        (
-            price,
-            previous_best,
-            self.best_ask,
+        DepthUpdate {
+            level_price: price,
+            previous_best_price: previous_best,
+            best_price: self.best_ask,
             previous_qty,
-            qty,
+            new_qty: qty,
             timestamp,
-        )
+        }
     }
 
     fn clear_depth(&mut self, side: Side, clear_upto_price: Option<Decimal>) {
