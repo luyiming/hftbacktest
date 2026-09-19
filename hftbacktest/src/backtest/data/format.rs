@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::{self, Read, Seek},
+    io::{self, BufWriter, Read, Seek, Write},
     path::Path,
 };
 
@@ -116,7 +116,12 @@ pub fn write_market_data_file(path: &Path, events: &[StoredEvent]) -> io::Result
             metadata_dtype(),
         )?;
         archive.start_file("data.npy", options)?;
-        write_array(&mut archive, events, stored_event_dtype())?;
+        {
+            // npyz writes each field separately; batch those writes before compression.
+            let mut buffered = BufWriter::with_capacity(1024 * 1024, &mut archive);
+            write_array(&mut buffered, events, stored_event_dtype())?;
+            buffered.flush()?;
+        }
         archive.finish()?;
     }
     temporary.as_file().sync_all()?;
@@ -156,6 +161,25 @@ mod tests {
                 qty: Decimal::from_i128_with_scale(1, DATA_SCALE),
             }]
         );
+    }
+
+    #[test]
+    fn roundtrips_data_larger_than_write_buffer() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        let path = directory.path().join("large.npz");
+        let events: Vec<_> = (0..30_000)
+            .map(|index| StoredEvent {
+                ev: 1,
+                exch_ts: index,
+                local_ts: index + 1,
+                px: index + 2,
+                qty: index + 3,
+            })
+            .collect();
+        write_market_data_file(&path, &events).expect("valid events should serialize");
+        let loaded = read_stored_events(File::open(&path).expect("archive should open"))
+            .expect("archive should load");
+        assert_eq!(loaded, events);
     }
 
     #[test]
