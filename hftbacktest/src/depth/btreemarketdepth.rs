@@ -104,8 +104,24 @@ impl L2MarketDepth for BTreeMarketDepth {
 
     fn clear_depth(&mut self, side: Side, clear_upto_price: Option<Decimal>) {
         match (side, clear_upto_price) {
-            (Side::Buy, Some(limit)) => self.bid_depth.retain(|price, _| *price < limit),
-            (Side::Sell, Some(limit)) => self.ask_depth.retain(|price, _| *price > limit),
+            (Side::Buy, Some(limit)) => {
+                while self
+                    .bid_depth
+                    .last_key_value()
+                    .is_some_and(|(&price, _)| price >= limit)
+                {
+                    self.bid_depth.pop_last();
+                }
+            }
+            (Side::Sell, Some(limit)) => {
+                while self
+                    .ask_depth
+                    .first_key_value()
+                    .is_some_and(|(&price, _)| price <= limit)
+                {
+                    self.ask_depth.pop_first();
+                }
+            }
             (Side::Buy, None) => self.bid_depth.clear(),
             (Side::Sell, None) => self.ask_depth.clear(),
         }

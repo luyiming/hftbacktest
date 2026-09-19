@@ -343,37 +343,39 @@ where
         Ok(())
     }
 
-    fn liquidity(&self, side: Side, limit: Option<Decimal>) -> Vec<(Decimal, Decimal)> {
+    fn liquidity(&self, order: &Order) -> (Vec<(Decimal, Decimal)>, Decimal) {
         let mut levels = Vec::new();
-        match side {
+        let mut remaining = order.leaves_qty;
+        let limit = (order.order_type == OrdType::Limit).then_some(order.price);
+        let mut visit = |price: Decimal, qty: Decimal| {
+            if limit.is_some_and(|limit| match order.side {
+                Side::Buy => price > limit,
+                Side::Sell => price < limit,
+            }) {
+                return false;
+            }
+            if qty > Decimal::ZERO {
+                let exec_qty = qty.min(remaining);
+                if exec_qty > Decimal::ZERO {
+                    levels.push((price, exec_qty));
+                    remaining -= exec_qty;
+                }
+            }
+            remaining > Decimal::ZERO
+        };
+        match order.side {
             Side::Buy => {
                 if let Some(start) = self.depth.best_ask() {
-                    self.depth.for_each_ask_depth_from(start, |price, qty| {
-                        if limit.is_some_and(|limit| price > limit) {
-                            return false;
-                        }
-                        if qty > Decimal::ZERO {
-                            levels.push((price, qty));
-                        }
-                        true
-                    });
+                    self.depth.for_each_ask_depth_from(start, &mut visit);
                 }
             }
             Side::Sell => {
                 if let Some(start) = self.depth.best_bid() {
-                    self.depth.for_each_bid_depth_from(start, |price, qty| {
-                        if limit.is_some_and(|limit| price < limit) {
-                            return false;
-                        }
-                        if qty > Decimal::ZERO {
-                            levels.push((price, qty));
-                        }
-                        true
-                    });
+                    self.depth.for_each_bid_depth_from(start, &mut visit);
                 }
             }
         }
-        levels
+        (levels, remaining)
     }
 
     fn rest_order(&mut self, order: &mut Order, timestamp: i64) {
@@ -437,21 +439,14 @@ where
             return Ok(());
         }
 
-        let limit = (order.order_type == OrdType::Limit).then_some(order.price);
-        let levels = self.liquidity(order.side, limit);
-        if order.time_in_force == TimeInForce::FOK {
-            let available: Decimal = levels.iter().map(|(_, qty)| *qty).sum();
-            if available < order.leaves_qty {
-                order.status = Status::Expired;
-                order.exch_timestamp = timestamp;
-                return Ok(());
-            }
+        let (levels, remaining) = self.liquidity(order);
+        if order.time_in_force == TimeInForce::FOK && remaining > Decimal::ZERO {
+            order.status = Status::Expired;
+            order.exch_timestamp = timestamp;
+            return Ok(());
         }
-        for (price, qty) in levels {
-            let exec_qty = qty.min(order.leaves_qty);
-            if exec_qty > Decimal::ZERO {
-                self.fill::<false>(order, timestamp, false, price, exec_qty)?;
-            }
+        for (price, exec_qty) in levels {
+            self.fill::<false>(order, timestamp, false, price, exec_qty)?;
             if order.status == Status::Filled {
                 return Ok(());
             }
@@ -786,5 +781,106 @@ mod tests {
 
         assert!(exchange.orders.borrow().is_empty());
         assert_eq!(exchange.state.values().position, -Decimal::ONE);
+    }
+
+    #[test]
+    fn liquidity_plans_only_the_levels_needed_to_fill() {
+        let mut exchange = exchange();
+        for price in [100, 101, 102] {
+            exchange
+                .depth
+                .update_ask_depth(Decimal::from(price), Decimal::TWO, 0);
+        }
+
+        let market_order = Order::new(
+            1,
+            Decimal::ZERO,
+            Decimal::ONE,
+            Side::Buy,
+            OrdType::Market,
+            TimeInForce::IOC,
+        );
+        assert_eq!(
+            exchange.liquidity(&market_order),
+            (vec![(Decimal::from(100), Decimal::ONE)], Decimal::ZERO)
+        );
+
+        let limit_order = Order::new(
+            2,
+            Decimal::from(100),
+            Decimal::from(3),
+            Side::Buy,
+            OrdType::Limit,
+            TimeInForce::FOK,
+        );
+        assert_eq!(
+            exchange.liquidity(&limit_order),
+            (vec![(Decimal::from(100), Decimal::TWO)], Decimal::ONE)
+        );
+
+        for price in [98, 99] {
+            exchange
+                .depth
+                .update_bid_depth(Decimal::from(price), Decimal::TWO, 0);
+        }
+        let sell_order = Order::new(
+            3,
+            Decimal::from(98),
+            Decimal::from(3),
+            Side::Sell,
+            OrdType::Limit,
+            TimeInForce::FOK,
+        );
+        assert_eq!(
+            exchange.liquidity(&sell_order),
+            (
+                vec![
+                    (Decimal::from(99), Decimal::TWO),
+                    (Decimal::from(98), Decimal::ONE),
+                ],
+                Decimal::ZERO,
+            )
+        );
+    }
+
+    #[test]
+    fn fok_checks_available_liquidity_before_filling() {
+        let mut exchange = exchange();
+        for price in [100, 101] {
+            exchange
+                .depth
+                .update_ask_depth(Decimal::from(price), Decimal::TWO, 0);
+        }
+
+        let mut insufficient = Order::new(
+            1,
+            Decimal::from(100),
+            Decimal::from(3),
+            Side::Buy,
+            OrdType::Limit,
+            TimeInForce::FOK,
+        );
+        exchange
+            .ack_new(&mut insufficient, 0)
+            .expect("insufficient FOK order should be processed");
+        assert_eq!(insufficient.status, Status::Expired);
+        assert_eq!(insufficient.cum_exec_qty, Decimal::ZERO);
+        assert_eq!(exchange.state.values().position, Decimal::ZERO);
+
+        let mut sufficient = Order::new(
+            2,
+            Decimal::from(101),
+            Decimal::from(3),
+            Side::Buy,
+            OrdType::Limit,
+            TimeInForce::FOK,
+        );
+        exchange
+            .ack_new(&mut sufficient, 0)
+            .expect("sufficient FOK order should be processed");
+        assert_eq!(sufficient.status, Status::Filled);
+        assert_eq!(sufficient.cum_exec_qty, Decimal::from(3));
+        assert_eq!(exchange.state.values().position, Decimal::from(3));
+        assert_eq!(exchange.state.values().num_trades, 2);
     }
 }
