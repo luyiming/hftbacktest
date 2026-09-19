@@ -115,7 +115,7 @@ pub fn write_market_data_file(path: &Path, events: &[StoredEvent]) -> io::Result
             &[MarketDataMetadata::CURRENT],
             metadata_dtype(),
         )?;
-        archive.start_file("data.npy", options)?;
+        archive.start_file("data.npy", options.large_file(true))?;
         {
             // npyz writes each field separately; batch those writes before compression.
             let mut buffered = BufWriter::with_capacity(1024 * 1024, &mut archive);
@@ -131,7 +131,7 @@ pub fn write_market_data_file(path: &Path, events: &[StoredEvent]) -> io::Result
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::io::{Cursor, SeekFrom};
 
     use super::*;
 
@@ -161,6 +161,26 @@ mod tests {
                 qty: Decimal::from_i128_with_scale(1, DATA_SCALE),
             }]
         );
+    }
+
+    #[test]
+    fn data_entry_reserves_zip64_sizes() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        let path = directory.path().join("events.npz");
+        write_market_data_file(&path, &[stored_event()]).expect("valid events should serialize");
+        let mut archive = ZipArchive::new(File::open(&path).expect("archive should open"))
+            .expect("archive should load");
+        let header_start = archive
+            .by_name("data.npy")
+            .expect("data entry should exist")
+            .header_start();
+        let mut file = File::open(&path).expect("archive should reopen");
+        file.seek(SeekFrom::Start(header_start + 18))
+            .expect("local header should be readable");
+        let mut sizes = [0_u8; 8];
+        file.read_exact(&mut sizes)
+            .expect("local header should contain both sizes");
+        assert_eq!(sizes, [u8::MAX; 8]);
     }
 
     #[test]
