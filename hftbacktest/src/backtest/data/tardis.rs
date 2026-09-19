@@ -228,14 +228,36 @@ mod tests {
     }
 
     #[test]
+    fn parses_scientific_depth_price_and_quantity_exactly() {
+        let csv = "exchange,symbol,timestamp,local_timestamp,is_snapshot,side,price,amount\n\
+                   binance,1000PEPEUSDT,1,2,false,bid,1e-7,2.5E-7\n";
+        let mut input = TardisReader::from_reader(
+            PathBuf::from("depth.csv"),
+            FeedKind::Depth,
+            Box::new(Cursor::new(csv.as_bytes().to_vec())),
+        )
+        .expect("valid header should load");
+        assert_eq!(
+            input.next_events().expect("scientific values should parse"),
+            Some(vec![StoredEvent {
+                ev: DEPTH_EVENT | BUY_EVENT,
+                exch_ts: 1000,
+                local_ts: 2000,
+                px: 10,
+                qty: 25,
+            }])
+        );
+    }
+
+    #[test]
     fn reports_original_field_and_location() {
-        let mut input = trades("binance,BTCUSDT,1,2,id,buy,1e-8,1");
+        let mut input = trades("binance,BTCUSDT,1,2,id,buy,1e-9,1");
         let error = input
             .next_events()
-            .expect_err("scientific notation must fail");
+            .expect_err("unrepresentable precision must fail");
         let message = format!("{error:#}");
-        assert!(message.contains("trades.csv record 2 field price value \"1e-8\""));
-        assert!(message.contains("plain decimal"));
+        assert!(message.contains("trades.csv record 2 field price value \"1e-9\""));
+        assert!(message.contains("cannot be represented exactly"));
     }
 
     #[test]

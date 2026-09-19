@@ -63,13 +63,27 @@ class ConversionTests(unittest.TestCase):
         self.write_trade("1")
         self.convert()
         original = self.output.read_bytes()
-        for price in ["1e-8", "0.000000001", "92233720368.54775808"]:
+        for price in ["1e-9", "0.000000001", "92233720368.54775808"]:
             self.write_trade(price)
             with self.assertRaisesRegex(ValueError, "record 2 field price"):
                 self.convert()
             self.assertEqual(self.output.read_bytes(), original)
         self.assertEqual(sorted(path.name for path in self.root.iterdir()),
                          ["depth.csv.gz", "events.npz", "trades.csv.gz"])
+
+    def test_scientific_values_are_stored_exactly(self):
+        with gzip.open(self.depth, "wt") as stream:
+            stream.write(
+                "exchange,symbol,timestamp,local_timestamp,is_snapshot,side,price,amount\n"
+                "binance,TEST,1,2,true,bid,1e-7,2.5E-7\n"
+                "binance,TEST,1,2,true,ask,2e-7,1e-7\n"
+            )
+        self.write_trade("1.5e-7")
+        self.convert()
+        with np.load(self.output, allow_pickle=False) as archive:
+            rows = archive["data"]
+            values = set(zip(rows["px"], rows["qty"]))
+            self.assertTrue({(10, 25), (20, 10), (15, 1)}.issubset(values))
 
     def test_eod_seeds_next_day_bbo_backoff(self):
         with gzip.open(self.depth, "wt") as stream:
