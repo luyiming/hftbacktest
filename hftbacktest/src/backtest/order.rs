@@ -1,4 +1,4 @@
-use std::{cell::UnsafeCell, collections::VecDeque, rc::Rc};
+use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 use crate::{
     backtest::{models::LatencyModel, snapshot::SnapshotContext},
@@ -9,7 +9,7 @@ use crate::{
 /// based on the given timestamp.
 #[derive(Clone, Debug, Default)]
 pub struct OrderBus {
-    order_list: Rc<UnsafeCell<VecDeque<(Order, i64)>>>,
+    order_list: Rc<RefCell<VecDeque<(Order, i64)>>>,
 }
 
 impl OrderBus {
@@ -20,7 +20,7 @@ impl OrderBus {
             .buses
             .entry(key)
             .or_insert_with(|| Self {
-                order_list: Rc::new(UnsafeCell::new(unsafe { &*self.order_list.get() }.clone())),
+                order_list: Rc::new(RefCell::new(self.order_list.borrow().clone())),
             })
             .clone()
     }
@@ -32,9 +32,7 @@ impl OrderBus {
 
     /// Returns the timestamp of the earliest order in the bus.
     pub fn earliest_timestamp(&self) -> Option<i64> {
-        unsafe { &*self.order_list.get() }
-            .front()
-            .map(|(_order, ts)| *ts)
+        self.order_list.borrow().front().map(|(_order, ts)| *ts)
     }
 
     /// Appends the order to the bus with the timestamp.
@@ -47,38 +45,30 @@ impl OrderBus {
     /// purpose of simplifying the backtesting process, all requests and responses are assumed to be
     /// in order.
     pub fn append(&mut self, order: Order, timestamp: i64) {
-        let latest_timestamp = {
-            let order_list = unsafe { &*self.order_list.get() };
-            let len = order_list.len();
-            if len > 0 {
-                let (_, timestamp) = order_list.get(len - 1).unwrap();
-                *timestamp
-            } else {
-                0
-            }
-        };
+        let mut order_list = self.order_list.borrow_mut();
+        let latest_timestamp = order_list.back().map_or(0, |(_, timestamp)| *timestamp);
         let timestamp = timestamp.max(latest_timestamp);
-        unsafe { &mut *self.order_list.get() }.push_back((order, timestamp));
+        order_list.push_back((order, timestamp));
     }
 
     /// Resets this to clear it.
     pub fn reset(&mut self) {
-        unsafe { &mut *self.order_list.get() }.clear();
+        self.order_list.borrow_mut().clear();
     }
 
     /// Returns the number of orders in the bus.
     pub fn len(&self) -> usize {
-        unsafe { &*self.order_list.get() }.len()
+        self.order_list.borrow().len()
     }
 
     /// Returns ``true`` if the ``OrderBus`` is empty.
     pub fn is_empty(&self) -> bool {
-        unsafe { &*self.order_list.get() }.is_empty()
+        self.order_list.borrow().is_empty()
     }
 
     /// Removes the first order and its timestamp and returns it, or ``None`` if the bus is empty.
     pub fn pop_front(&mut self) -> Option<(Order, i64)> {
-        unsafe { &mut *self.order_list.get() }.pop_front()
+        self.order_list.borrow_mut().pop_front()
     }
 }
 
