@@ -2,7 +2,7 @@ use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 use crate::{
     backtest::{models::LatencyModel, snapshot::SnapshotContext},
-    types::{OrderRequest, OrderUpdate, RequestOutcome, RequestResult},
+    types::{OrderRequest, OrderUpdate},
 };
 
 #[derive(Clone, Debug)]
@@ -94,8 +94,12 @@ where
     }
 
     pub fn respond(&mut self, update: OrderUpdate) {
-        let local_recv_timestamp =
-            update.exch_timestamp + self.order_latency.response(update.exch_timestamp, &update);
+        let response_latency = self.order_latency.response(update.exch_timestamp, &update);
+        assert!(
+            response_latency >= 0,
+            "order response latency must be nonnegative"
+        );
+        let local_recv_timestamp = update.exch_timestamp + response_latency;
         self.to_local
             .append(OrderMessage::Update(update), local_recv_timestamp);
     }
@@ -142,28 +146,13 @@ where
         let entry_latency = self
             .order_latency
             .entry(request.local_timestamp(), &request);
-        if entry_latency < 0 {
-            let update = OrderUpdate {
-                order_id: request.order_id(),
-                exch_timestamp: 0,
-                fills: Vec::new(),
-                state: None,
-                request_result: Some(RequestResult {
-                    request_id: request.request_id(),
-                    local_timestamp: request.local_timestamp(),
-                    kind: request.kind(),
-                    outcome: RequestOutcome::Rejected,
-                }),
-            };
-            self.to_local.append(
-                OrderMessage::Update(update),
-                request.local_timestamp() - entry_latency,
-            );
-        } else {
-            let receive_timestamp = request.local_timestamp() + entry_latency;
-            self.to_exch
-                .append(OrderMessage::Request(request), receive_timestamp);
-        }
+        assert!(
+            entry_latency >= 0,
+            "order entry latency must be nonnegative"
+        );
+        let receive_timestamp = request.local_timestamp() + entry_latency;
+        self.to_exch
+            .append(OrderMessage::Request(request), receive_timestamp);
     }
 
     pub fn receive(&mut self, receipt_timestamp: i64) -> Option<OrderUpdate> {
