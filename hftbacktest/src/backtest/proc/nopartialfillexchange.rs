@@ -13,7 +13,7 @@ use crate::{
         models::{FeeModel, LatencyModel, QueueModel},
         order_bus::ExchToLocal,
         proc::{
-            Processor,
+            Processor, RestingOrder,
             price_match::{price_satisfies_rule, resolve_price_match},
         },
         rules::TickSizeSchedule,
@@ -64,8 +64,8 @@ where
     MD: MarketDepth,
     FM: FeeModel,
 {
-    // key: order_id, value: Order<Q>
-    orders: Rc<RefCell<HashMap<OrderId, Order>>>,
+    // key: order_id, value: resting order and its queue-model state
+    orders: Rc<RefCell<HashMap<OrderId, RestingOrder<QM::State>>>>,
     // key: order's price, value: order_ids
     buy_orders: HashMap<Decimal, HashSet<OrderId>>,
     sell_orders: HashMap<Decimal, HashSet<OrderId>>,
@@ -138,11 +138,12 @@ where
 
     fn check_if_sell_filled(
         &mut self,
-        order: &mut Order,
+        resting: &mut RestingOrder<QM::State>,
         price: Decimal,
         qty: Decimal,
         timestamp: i64,
     ) -> Result<(), BacktestError> {
+        let RestingOrder { order, queue_state } = resting;
         match order.price.cmp(&price) {
             Ordering::Greater => {}
             Ordering::Less => {
@@ -150,9 +151,7 @@ where
                 return self.fill::<true>(order, timestamp, true, order.price);
             }
             Ordering::Equal => {
-                // Updates the order's queue position.
-                self.queue_model.trade(order, qty, &self.depth);
-                if self.queue_model.is_filled(order, &self.depth) > Decimal::ZERO {
+                if self.queue_model.trade(order, queue_state, qty, &self.depth) > Decimal::ZERO {
                     self.filled_orders.push(order.order_id);
                     return self.fill::<true>(order, timestamp, true, order.price);
                 }
@@ -163,11 +162,12 @@ where
 
     fn check_if_buy_filled(
         &mut self,
-        order: &mut Order,
+        resting: &mut RestingOrder<QM::State>,
         price: Decimal,
         qty: Decimal,
         timestamp: i64,
     ) -> Result<(), BacktestError> {
+        let RestingOrder { order, queue_state } = resting;
         match order.price.cmp(&price) {
             Ordering::Greater => {
                 self.filled_orders.push(order.order_id);
@@ -175,9 +175,7 @@ where
             }
             Ordering::Less => {}
             Ordering::Equal => {
-                // Updates the order's queue position.
-                self.queue_model.trade(order, qty, &self.depth);
-                if self.queue_model.is_filled(order, &self.depth) > Decimal::ZERO {
+                if self.queue_model.trade(order, queue_state, qty, &self.depth) > Decimal::ZERO {
                     self.filled_orders.push(order.order_id);
                     return self.fill::<true>(order, timestamp, true, order.price);
                 }
@@ -222,7 +220,10 @@ where
         if !self.filled_orders.is_empty() {
             let mut orders = self.orders.borrow_mut();
             for order_id in self.filled_orders.drain(..) {
-                let order = orders.remove(&order_id).unwrap();
+                let resting = orders
+                    .remove(&order_id)
+                    .expect("filled order should remain in the resting-order map");
+                let order = resting.order;
                 if order.side == Side::Buy {
                     self.buy_orders
                         .get_mut(&order.price)
@@ -243,9 +244,16 @@ where
         if let Some(order_ids) = self.buy_orders.get(&price) {
             for order_id in order_ids.iter() {
                 let mut orders_borrowed = orders.borrow_mut();
-                let order = orders_borrowed.get_mut(order_id).unwrap();
-                self.queue_model
-                    .depth(order, prev_qty, new_qty, &self.depth);
+                let resting = orders_borrowed
+                    .get_mut(order_id)
+                    .expect("indexed buy order should remain in the resting-order map");
+                self.queue_model.depth(
+                    &resting.order,
+                    &mut resting.queue_state,
+                    prev_qty,
+                    new_qty,
+                    &self.depth,
+                );
             }
         }
     }
@@ -255,9 +263,16 @@ where
         if let Some(order_ids) = self.sell_orders.get(&price) {
             for order_id in order_ids.iter() {
                 let mut orders_borrowed = orders.borrow_mut();
-                let order = orders_borrowed.get_mut(order_id).unwrap();
-                self.queue_model
-                    .depth(order, prev_qty, new_qty, &self.depth);
+                let resting = orders_borrowed
+                    .get_mut(order_id)
+                    .expect("indexed sell order should remain in the resting-order map");
+                self.queue_model.depth(
+                    &resting.order,
+                    &mut resting.queue_state,
+                    prev_qty,
+                    new_qty,
+                    &self.depth,
+                );
             }
         }
     }
@@ -270,7 +285,8 @@ where
         {
             let orders = self.orders.clone();
             let mut orders_borrowed = orders.borrow_mut();
-            for order in orders_borrowed.values_mut() {
+            for resting in orders_borrowed.values_mut() {
+                let order = &mut resting.order;
                 if order.side == Side::Sell && order.price <= new_best_price {
                     self.filled_orders.push(order.order_id);
                     self.fill::<true>(order, timestamp, true, order.price)?;
@@ -289,7 +305,8 @@ where
         {
             let orders = self.orders.clone();
             let mut orders_borrowed = orders.borrow_mut();
-            for order in orders_borrowed.values_mut() {
+            for resting in orders_borrowed.values_mut() {
+                let order = &mut resting.order;
                 if order.side == Side::Buy && order.price >= new_best_price {
                     self.filled_orders.push(order.order_id);
                     self.fill::<true>(order, timestamp, true, order.price)?;
@@ -347,8 +364,6 @@ where
                     } else {
                         match order.time_in_force {
                             TimeInForce::GTC | TimeInForce::GTX => {
-                                // Initializes the order's queue position.
-                                self.queue_model.new_order(order, &self.depth);
                                 order.status = OrderStatus::Open;
                                 // The exchange accepts this order.
                                 self.buy_orders
@@ -357,9 +372,14 @@ where
                                     .insert(order.order_id);
 
                                 order.exch_timestamp = timestamp;
-                                self.orders
-                                    .borrow_mut()
-                                    .insert(order.order_id, order.clone());
+                                let queue_state = self.queue_model.new_order(order, &self.depth);
+                                self.orders.borrow_mut().insert(
+                                    order.order_id,
+                                    RestingOrder {
+                                        order: order.clone(),
+                                        queue_state,
+                                    },
+                                );
                                 Ok(())
                             }
                             TimeInForce::FOK | TimeInForce::IOC => {
@@ -407,8 +427,6 @@ where
                     } else {
                         match order.time_in_force {
                             TimeInForce::GTC | TimeInForce::GTX => {
-                                // Initializes the order's queue position.
-                                self.queue_model.new_order(order, &self.depth);
                                 order.status = OrderStatus::Open;
                                 // The exchange accepts this order.
                                 self.sell_orders
@@ -417,9 +435,14 @@ where
                                     .insert(order.order_id);
 
                                 order.exch_timestamp = timestamp;
-                                self.orders
-                                    .borrow_mut()
-                                    .insert(order.order_id, order.clone());
+                                let queue_state = self.queue_model.new_order(order, &self.depth);
+                                self.orders.borrow_mut().insert(
+                                    order.order_id,
+                                    RestingOrder {
+                                        order: order.clone(),
+                                        queue_state,
+                                    },
+                                );
                                 Ok(())
                             }
                             TimeInForce::FOK | TimeInForce::IOC => {
@@ -449,7 +472,7 @@ where
     }
 
     fn ack_cancel(&mut self, order_id: OrderId, timestamp: i64) -> Option<Order> {
-        let mut order = self.orders.borrow_mut().remove(&order_id)?;
+        let mut order = self.orders.borrow_mut().remove(&order_id)?.order;
         if order.side == Side::Buy {
             self.buy_orders
                 .get_mut(&order.price)
@@ -474,7 +497,12 @@ where
         qty: Decimal,
         timestamp: i64,
     ) -> Result<(Option<Order>, Vec<OrderFill>, bool), BacktestError> {
-        let Some(existing) = self.orders.borrow().get(&order_id).cloned() else {
+        let Some(existing) = self
+            .orders
+            .borrow()
+            .get(&order_id)
+            .map(|resting| resting.order.clone())
+        else {
             return Ok((None, Vec::new(), false));
         };
         let previous_fill_count = existing.fills.len();
@@ -508,6 +536,8 @@ where
             return Ok((Some(order), Vec::new(), true));
         }
 
+        // Every accepted modify is cancel-replace, including a same-price change, so the queue
+        // position must be initialized again.
         order.price = requested_price;
         order.price_match = price_match;
         order.qty = qty;
@@ -584,9 +614,9 @@ where
             {
                 let orders = self.orders.clone();
                 let mut orders_borrowed = orders.borrow_mut();
-                for order in orders_borrowed.values_mut() {
-                    if order.side == Side::Sell {
-                        self.check_if_sell_filled(order, price, qty, event.exch_ts)?;
+                for resting in orders_borrowed.values_mut() {
+                    if resting.order.side == Side::Sell {
+                        self.check_if_sell_filled(resting, price, qty, event.exch_ts)?;
                     }
                 }
             }
@@ -597,9 +627,9 @@ where
             {
                 let orders = self.orders.clone();
                 let mut orders_borrowed = orders.borrow_mut();
-                for order in orders_borrowed.values_mut() {
-                    if order.side == Side::Buy {
-                        self.check_if_buy_filled(order, price, qty, event.exch_ts)?;
+                for resting in orders_borrowed.values_mut() {
+                    if resting.order.side == Side::Buy {
+                        self.check_if_buy_filled(resting, price, qty, event.exch_ts)?;
                     }
                 }
             }
@@ -755,7 +785,7 @@ mod tests {
             .0
             .expect("quantity-only modify should be accepted");
         assert_eq!(quantity_only.status, OrderStatus::Open);
-        assert_eq!(exchange.orders.borrow()[&1].price, price);
+        assert_eq!(exchange.orders.borrow()[&1].order.price, price);
 
         let mut invalid_price = quantity_only.clone();
         invalid_price.price = Decimal::new(10006, 2);
@@ -772,7 +802,7 @@ mod tests {
                 .expect("invalid price modify should be rejected normally")
                 .2
         );
-        assert_eq!(exchange.orders.borrow()[&1].price, price);
+        assert_eq!(exchange.orders.borrow()[&1].order.price, price);
 
         let mut missing_price_match = quantity_only;
         missing_price_match.price_match = PriceMatch::Opponent20;
@@ -788,7 +818,52 @@ mod tests {
                 .expect("missing price match should be rejected normally")
                 .2
         );
-        assert_eq!(exchange.orders.borrow()[&1].price, price);
+        assert_eq!(exchange.orders.borrow()[&1].order.price, price);
+    }
+
+    #[test]
+    fn same_price_modify_resets_queue_position() {
+        let mut exchange = exchange();
+        let price = Decimal::from(99);
+        let mut order = Order::new(
+            1,
+            price,
+            Decimal::ONE,
+            Side::Buy,
+            OrdType::Limit,
+            TimeInForce::GTC,
+        );
+        exchange
+            .ack_new(&mut order, 0)
+            .expect("resting order should be accepted");
+
+        exchange
+            .process(&Event {
+                ev: EXCH_SELL_TRADE_EVENT,
+                exch_ts: 1,
+                local_ts: 1,
+                px: price,
+                qty: Decimal::new(75, 2),
+            })
+            .expect("first trade should be processed");
+        assert!(
+            exchange
+                .ack_modify(1, price, PriceMatch::None, Decimal::TWO, 2)
+                .expect("same-price modify should be processed")
+                .2
+        );
+
+        exchange
+            .process(&Event {
+                ev: EXCH_SELL_TRADE_EVENT,
+                exch_ts: 3,
+                local_ts: 3,
+                px: price,
+                qty: Decimal::new(50, 2),
+            })
+            .expect("second trade should be processed");
+
+        assert_eq!(exchange.orders.borrow()[&1].order.filled, Decimal::ZERO);
     }
 
     #[test]

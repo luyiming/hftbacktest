@@ -2,45 +2,48 @@ use rust_decimal::{
     Decimal,
     prelude::{FromPrimitive, ToPrimitive},
 };
-use std::{any::Any, marker::PhantomData};
+use std::marker::PhantomData;
 
 use crate::{
     depth::MarketDepth,
-    types::{AnyClone, Order, Side},
+    types::{Order, Side},
 };
 
-/// Provides an estimation of the order's queue position.
+/// Estimates the queue position of each resting order.
+///
+/// The exchange owns one [`State`](QueueModel::State) per resting order and passes it back to the
+/// same model for every transition. Implementations must return a nonnegative executable quantity
+/// from [`trade`](QueueModel::trade).
 pub trait QueueModel<MD>
 where
     MD: MarketDepth,
 {
+    /// Per-order state maintained while an order rests in the book.
+    type State: Clone + Send;
+
     /// Initialize the queue position and other necessary values for estimation.
     /// This function is called when the exchange model accepts the new order.
-    fn new_order(&self, order: &mut Order, depth: &MD);
+    fn new_order(&self, order: &Order, depth: &MD) -> Self::State;
 
-    /// Adjusts the estimation values when market trades occur at the same price.
-    fn trade(&self, order: &mut Order, qty: Decimal, depth: &MD);
+    /// Adjusts the estimation values when market trades occur at the same price and returns the
+    /// quantity available to execute after the queue ahead has been consumed.
+    fn trade(&self, order: &Order, state: &mut Self::State, qty: Decimal, depth: &MD) -> Decimal;
 
-    /// Adjusts the estimation values when market depth changes at the same price.
-    fn depth(&self, order: &mut Order, prev_qty: Decimal, new_qty: Decimal, depth: &MD);
-
-    fn is_filled(&self, order: &mut Order, depth: &MD) -> Decimal;
+    /// Adjusts the estimation values after market depth changes at the same price.
+    fn depth(
+        &self,
+        order: &Order,
+        state: &mut Self::State,
+        prev_qty: Decimal,
+        new_qty: Decimal,
+        depth: &MD,
+    );
 }
 
 /// Provides a conservative queue position model, where your order's queue position advances only
 /// when trades occur at the same price level.
 #[derive(Clone)]
 pub struct RiskAdverseQueueModel<MD>(PhantomData<MD>);
-
-impl AnyClone for Decimal {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-}
 
 impl<MD> RiskAdverseQueueModel<MD> {
     #[allow(clippy::new_without_default)]
@@ -53,27 +56,24 @@ impl<MD> QueueModel<MD> for RiskAdverseQueueModel<MD>
 where
     MD: MarketDepth,
 {
-    fn new_order(&self, order: &mut Order, depth: &MD) {
-        let front_q_qty = if order.side == Side::Buy {
+    type State = Decimal;
+
+    fn new_order(&self, order: &Order, depth: &MD) -> Self::State {
+        if order.side == Side::Buy {
             depth.bid_qty_at_price(order.price)
         } else {
             depth.ask_qty_at_price(order.price)
-        };
-        order.q = Box::new(front_q_qty);
+        }
     }
 
-    fn trade(&self, order: &mut Order, qty: Decimal, _depth: &MD) {
-        let front_q_qty = order.q.as_any_mut().downcast_mut::<Decimal>().unwrap();
+    fn trade(
+        &self,
+        _order: &Order,
+        front_q_qty: &mut Self::State,
+        qty: Decimal,
+        _depth: &MD,
+    ) -> Decimal {
         *front_q_qty -= qty;
-    }
-
-    fn depth(&self, order: &mut Order, _prev_qty: Decimal, new_qty: Decimal, _depth: &MD) {
-        let front_q_qty = order.q.as_any_mut().downcast_mut::<Decimal>().unwrap();
-        *front_q_qty = (*front_q_qty).min(new_qty);
-    }
-
-    fn is_filled(&self, order: &mut Order, _depth: &MD) -> Decimal {
-        let front_q_qty = order.q.as_any_mut().downcast_mut::<Decimal>().unwrap();
         if *front_q_qty < Decimal::ZERO {
             let exec = -*front_q_qty;
             *front_q_qty = Decimal::ZERO;
@@ -82,6 +82,17 @@ where
             Decimal::ZERO
         }
     }
+
+    fn depth(
+        &self,
+        _order: &Order,
+        front_q_qty: &mut Self::State,
+        _prev_qty: Decimal,
+        new_qty: Decimal,
+        _depth: &MD,
+    ) {
+        *front_q_qty = (*front_q_qty).min(new_qty);
+    }
 }
 
 /// Stores the values needed for queue position estimation and adjustment for [`ProbQueueModel`].
@@ -89,16 +100,6 @@ where
 pub struct QueuePos {
     front_q_qty: Decimal,
     cum_trade_qty: Decimal,
-}
-
-impl AnyClone for QueuePos {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
 }
 
 impl Default for QueuePos {
@@ -151,27 +152,41 @@ where
     P: Probability,
     MD: MarketDepth,
 {
-    fn new_order(&self, order: &mut Order, depth: &MD) {
+    type State = QueuePos;
+
+    fn new_order(&self, order: &Order, depth: &MD) -> Self::State {
         let mut q = QueuePos::default();
         if order.side == Side::Buy {
             q.front_q_qty = depth.bid_qty_at_price(order.price);
         } else {
             q.front_q_qty = depth.ask_qty_at_price(order.price);
         }
-        order.q = Box::new(q);
+        q
     }
 
-    fn trade(&self, order: &mut Order, qty: Decimal, _depth: &MD) {
-        let q = order.q.as_any_mut().downcast_mut::<QueuePos>().unwrap();
+    fn trade(&self, _order: &Order, q: &mut Self::State, qty: Decimal, _depth: &MD) -> Decimal {
         q.front_q_qty -= qty;
         q.cum_trade_qty += qty;
+        if q.front_q_qty < Decimal::ZERO {
+            let exec = -q.front_q_qty;
+            q.front_q_qty = Decimal::ZERO;
+            exec
+        } else {
+            Decimal::ZERO
+        }
     }
 
-    fn depth(&self, order: &mut Order, prev_qty: Decimal, new_qty: Decimal, _depth: &MD) {
+    fn depth(
+        &self,
+        _order: &Order,
+        q: &mut Self::State,
+        prev_qty: Decimal,
+        new_qty: Decimal,
+        _depth: &MD,
+    ) {
         let mut chg = prev_qty - new_qty;
         // In order to avoid duplicate order queue position adjustment, subtract queue position
         // change by trades.
-        let q = order.q.as_any_mut().downcast_mut::<QueuePos>().unwrap();
         chg -= q.cum_trade_qty;
         // Reset, as quantity change by trade should be already reflected in qty.
         q.cum_trade_qty = Decimal::ZERO;
@@ -197,17 +212,6 @@ where
         let est_front =
             front - (Decimal::ONE - prob) * chg + (back - prob * chg).min(Decimal::ZERO);
         q.front_q_qty = est_front.min(new_qty);
-    }
-
-    fn is_filled(&self, order: &mut Order, _depth: &MD) -> Decimal {
-        let q = order.q.as_any_mut().downcast_mut::<QueuePos>().unwrap();
-        if q.front_q_qty < Decimal::ZERO {
-            let exec = -q.front_q_qty;
-            q.front_q_qty = Decimal::ZERO;
-            exec
-        } else {
-            Decimal::ZERO
-        }
     }
 }
 
@@ -339,7 +343,7 @@ mod tests {
         let mut depth = BTreeMarketDepth::new();
         let price = Decimal::new(10025, 2);
         depth.update_bid_depth(price, Decimal::new(125, 2), 0);
-        let mut order = Order::new(
+        let order = Order::new(
             1,
             price,
             Decimal::ONE,
@@ -348,8 +352,10 @@ mod tests {
             TimeInForce::GTC,
         );
         let model = RiskAdverseQueueModel::<BTreeMarketDepth>::new();
-        model.new_order(&mut order, &depth);
-        model.trade(&mut order, Decimal::new(130, 2), &depth);
-        assert_eq!(model.is_filled(&mut order, &depth), Decimal::new(5, 2));
+        let mut state = model.new_order(&order, &depth);
+        assert_eq!(
+            model.trade(&order, &mut state, Decimal::new(130, 2), &depth),
+            Decimal::new(5, 2)
+        );
     }
 }

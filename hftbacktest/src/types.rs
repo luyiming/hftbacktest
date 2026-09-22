@@ -1,10 +1,8 @@
 use std::{
-    any::Any,
     collections::HashMap,
     fmt::{Debug, Formatter},
 };
 
-use dyn_clone::DynClone;
 use rust_decimal::Decimal;
 use thiserror::Error;
 
@@ -288,37 +286,6 @@ impl OrdType {
     }
 }
 
-/// Provides cloning of `Box<dyn Any>`, which is utilized in [Order] for the additional data used in
-/// [`QueueModel`](`crate::backtest::models::QueueModel`).
-///
-/// **Usage:**
-/// ```ignore
-/// impl AnyClone for QueuePos {
-///     fn as_any(&self) -> &dyn Any {
-///         self
-///     }
-///
-///     fn as_any_mut(&mut self) -> &mut dyn Any {
-///         self
-///     }
-/// }
-/// ```
-pub trait AnyClone: DynClone {
-    fn as_any(&self) -> &dyn Any;
-    fn as_any_mut(&mut self) -> &mut dyn Any;
-}
-dyn_clone::clone_trait_object!(AnyClone);
-
-impl AnyClone for () {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-}
-
 /// A single simulated execution of an order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OrderFill {
@@ -454,9 +421,6 @@ pub struct Order {
     /// processes the order, will be set if the value is available.
     pub exch_timestamp: i64,
     pub order_id: u64,
-    /// Additional data used for [`QueueModel`](`crate::backtest::models::QueueModel`).
-    /// This is only available in backtesting.
-    pub q: Box<dyn AnyClone + Send>,
     pub order_type: OrdType,
     pub status: OrderStatus,
     pub side: Side,
@@ -484,7 +448,6 @@ impl Order {
             exch_timestamp: 0,
             status: OrderStatus::Open,
             order_id,
-            q: Box::new(()),
             order_type,
         }
     }

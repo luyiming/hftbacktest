@@ -22,6 +22,12 @@ use crate::{
     },
 };
 
+#[derive(Clone)]
+struct RestingOrder<S> {
+    order: Order,
+    queue_state: S,
+}
+
 /// Provides local-specific interaction.
 pub trait LocalProcessor<MD>: Processor
 where
