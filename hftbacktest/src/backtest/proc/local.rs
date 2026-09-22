@@ -1,5 +1,8 @@
 use rust_decimal::Decimal;
-use std::collections::HashMap;
+use std::{
+    collections::{HashMap, VecDeque},
+    time::Duration,
+};
 
 use crate::{
     backtest::{
@@ -35,7 +38,11 @@ where
     order_l2e: LocalToExch<LM>,
     depth: MD,
     state: State<AT, FM>,
-    trades: Vec<Event>,
+    trades: VecDeque<Event>,
+    record_trades: bool,
+    trade_horizon: Option<Duration>,
+    trade_time: i64,
+    trades_since: Option<i64>,
     last_feed_latency: Option<(i64, i64)>,
     last_order_latency: Option<(i64, i64, i64)>,
     snapshot_fn: Option<LocalSnapshotFn<Self, MD>>,
@@ -63,11 +70,21 @@ where
             order_l2e,
             depth,
             state,
-            trades: Vec::with_capacity(last_trades_cap),
+            trades: VecDeque::with_capacity(last_trades_cap),
+            record_trades: last_trades_cap > 0,
+            trade_horizon: None,
+            trade_time: 0,
+            trades_since: None,
             last_feed_latency: None,
             last_order_latency: None,
             snapshot_fn: None,
         }
+    }
+
+    pub(crate) fn configure_trades(mut self, enabled: bool, horizon: Option<Duration>) -> Self {
+        self.record_trades = enabled;
+        self.trade_horizon = horizon;
+        self
     }
 
     pub(crate) fn enable_snapshot(mut self) -> Self
@@ -78,9 +95,9 @@ where
         FM: SnapshotState + 'static,
     {
         self.snapshot_fn = Some(|source, context| {
-            // Capacity is the retention limit, including when the trade buffer is empty.
-            let mut trades = Vec::with_capacity(source.trades.capacity());
-            trades.extend_from_slice(&source.trades);
+            // Preserve allocated storage for subsequent batches, including an empty buffer.
+            let mut trades = VecDeque::with_capacity(source.trades.capacity());
+            trades.extend(source.trades.iter().cloned());
             Box::new(Self {
                 orders: source.orders.clone(),
                 pending_requests: source.pending_requests.clone(),
@@ -90,6 +107,10 @@ where
                 depth: source.depth.clone(),
                 state: source.state.clone(),
                 trades,
+                record_trades: source.record_trades,
+                trade_horizon: source.trade_horizon,
+                trade_time: source.trade_time,
+                trades_since: source.trades_since,
                 last_feed_latency: source.last_feed_latency,
                 last_order_latency: source.last_order_latency,
                 snapshot_fn: source.snapshot_fn,
@@ -249,12 +270,37 @@ where
         self.last_request_results.get(&order_id).copied()
     }
 
-    fn last_trades(&self) -> &[Event] {
-        self.trades.as_slice()
+    fn last_trades(&self) -> std::collections::vec_deque::Iter<'_, Event> {
+        self.trades.iter()
     }
 
     fn clear_last_trades(&mut self) {
         self.trades.clear();
+        self.trades_since = self.trades_since.map(|_| self.trade_time);
+    }
+
+    fn last_trades_since(&self) -> Option<i64> {
+        self.trades_since
+    }
+
+    fn advance_trade_time(&mut self, timestamp: i64) {
+        self.trade_time = timestamp;
+        if !self.record_trades {
+            return;
+        }
+        let since = self.trades_since.get_or_insert(timestamp);
+        if let Some(horizon) = self.trade_horizon {
+            let cutoff = (i128::from(timestamp) - horizon.as_nanos() as i128)
+                .max(i128::from(i64::MIN)) as i64;
+            *since = (*since).max(cutoff);
+            while self
+                .trades
+                .front()
+                .is_some_and(|event| event.local_ts <= cutoff)
+            {
+                self.trades.pop_front();
+            }
+        }
     }
 
     fn feed_latency(&self) -> Option<(i64, i64)> {
@@ -278,6 +324,7 @@ where
     }
 
     fn process(&mut self, ev: &Event) -> Result<(), BacktestError> {
+        self.advance_trade_time(ev.local_ts);
         // Processes a depth event
         if ev.is(LOCAL_BID_DEPTH_CLEAR_EVENT) {
             self.depth.clear_depth(Side::Buy, Some(ev.px));
@@ -298,11 +345,9 @@ where
             }
         }
         // Processes a trade event
-        else if ev.is(LOCAL_TRADE_EVENT) && self.trades.capacity() > 0 {
-            if self.trades.len() == self.trades.capacity() {
-                self.trades.remove(0);
-            }
-            self.trades.push(ev.clone());
+        else if ev.is(LOCAL_TRADE_EVENT) && self.record_trades {
+            self.trades.push_back(ev.clone());
+            self.advance_trade_time(ev.local_ts);
         }
 
         // Stores the current feed latency
@@ -396,6 +441,110 @@ mod tests {
         depth::BTreeMarketDepth,
         types::{EXCH_ASK_DEPTH_EVENT, EXCH_SELL_TRADE_EVENT, OrderStatus, RequestOutcome},
     };
+
+    fn trade_recording_local(
+        capacity: usize,
+    ) -> Local<LinearAsset, ConstantLatency, BTreeMarketDepth, TradingValueFeeModel<CommonFees>>
+    {
+        let (_, order_l2e) = order_bus(ConstantLatency::new(0, 0));
+        Local::new(
+            BTreeMarketDepth::new(),
+            State::new(
+                LinearAsset::new(Decimal::ONE),
+                TradingValueFeeModel::new(CommonFees::new(Decimal::ZERO, Decimal::ZERO)),
+            ),
+            capacity,
+            order_l2e,
+        )
+        .enable_snapshot()
+    }
+
+    fn market_trade(timestamp: i64) -> Event {
+        Event {
+            ev: crate::types::LOCAL_BUY_TRADE_EVENT,
+            exch_ts: timestamp,
+            local_ts: timestamp,
+            px: Decimal::from(100),
+            qty: Decimal::ONE,
+        }
+    }
+
+    #[test]
+    fn records_all_trades_past_initial_capacity_until_cleared() {
+        let mut local = trade_recording_local(1);
+        let trades: Vec<_> = (1..=10).map(market_trade).collect();
+        for trade in &trades {
+            local.process(trade).expect("trade should be processed");
+        }
+        assert_eq!(
+            local.last_trades().collect::<Vec<_>>(),
+            trades.iter().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            local.last_trades().collect::<Vec<_>>(),
+            trades.iter().collect::<Vec<_>>()
+        );
+        let capacity = local.trades.capacity();
+        local.clear_last_trades();
+        assert!(local.last_trades().len() == 0);
+        assert_eq!(local.trades.capacity(), capacity);
+        local
+            .process(&trades[0])
+            .expect("trade should be processed");
+        assert_eq!(
+            local.last_trades().collect::<Vec<_>>(),
+            trades[..1].iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn trade_snapshots_preserve_pending_batches_and_recording_after_clear() {
+        let mut local = trade_recording_local(1);
+        let trades: Vec<_> = (1..=10).map(market_trade).collect();
+        for trade in &trades {
+            local.process(trade).expect("trade should be processed");
+        }
+        let mut branch = local
+            .snapshot_local(&mut SnapshotContext::default())
+            .expect("local snapshot should succeed");
+        local.clear_last_trades();
+        assert_eq!(
+            branch.last_trades().collect::<Vec<_>>(),
+            trades.iter().collect::<Vec<_>>()
+        );
+        branch.clear_last_trades();
+        let mut empty_branch = branch
+            .snapshot_local(&mut SnapshotContext::default())
+            .expect("empty local snapshot should succeed");
+        for trade in &trades {
+            empty_branch
+                .process(trade)
+                .expect("trade should be processed");
+        }
+        assert_eq!(
+            empty_branch.last_trades().collect::<Vec<_>>(),
+            trades.iter().collect::<Vec<_>>()
+        );
+        assert!(branch.last_trades().len() == 0);
+        assert!(local.last_trades().len() == 0);
+    }
+
+    #[test]
+    fn zero_capacity_disables_recording_including_after_snapshot() {
+        let mut local = trade_recording_local(0);
+        local
+            .process(&market_trade(1))
+            .expect("trade should be processed");
+        assert!(local.last_trades().len() == 0);
+        local.clear_last_trades();
+        let mut branch = local
+            .snapshot_local(&mut SnapshotContext::default())
+            .expect("local snapshot should succeed");
+        branch
+            .process(&market_trade(2))
+            .expect("trade should be processed");
+        assert!(branch.last_trades().len() == 0);
+    }
 
     #[test]
     fn preserves_each_fill_in_a_multilevel_order_update() {

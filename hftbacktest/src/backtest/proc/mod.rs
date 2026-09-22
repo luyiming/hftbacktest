@@ -176,10 +176,20 @@ where
     /// Returns the most recent completed request result for an order.
     fn last_order_request_result(&self, order_id: OrderId) -> Option<RequestResult>;
 
-    /// Returns the last market trades.
-    fn last_trades(&self) -> &[Event];
+    /// Returns retained local market trades in processing order.
+    ///
+    /// Reading does not consume trades. A finite horizon expires trades in local time;
+    /// with no horizon the buffer grows until explicitly cleared.
+    fn last_trades(&self) -> std::collections::vec_deque::Iter<'_, Event>;
 
-    /// Clears the last market trades from the buffer.
+    /// Earliest covered local timestamp (exclusive), or `None` if recording is disabled
+    /// or replay has not started. This describes replay coverage, not source data quality.
+    fn last_trades_since(&self) -> Option<i64>;
+
+    /// Advances retention and coverage even when no new trades arrive.
+    fn advance_trade_time(&mut self, timestamp: i64);
+
+    /// Clears recorded market trades while retaining allocated capacity and recording state.
     fn clear_last_trades(&mut self);
 
     /// Returns the last feed's exchange timestamp and local receipt timestamp.

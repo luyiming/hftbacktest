@@ -607,12 +607,19 @@ where
     /// * `asset_no` - Asset number from which the market depth will be retrieved.
     fn depth(&self, asset_no: usize) -> &MD;
 
-    /// Returns the last market trades.
+    /// Returns retained local market trades in processing order.
+    ///
+    /// Reading does not consume trades. A finite horizon expires trades in local time;
+    /// with no horizon the buffer grows until explicitly cleared.
     ///
     /// * `asset_no` - Asset number from which the last market trades will be retrieved.
-    fn last_trades(&self, asset_no: usize) -> &[Event];
+    fn last_trades(&self, asset_no: usize) -> std::collections::vec_deque::Iter<'_, Event>;
 
-    /// Clears the last market trades from the buffer.
+    /// Earliest covered local timestamp (exclusive), or `None` if recording is disabled
+    /// or replay has not started. This describes replay coverage, not source data quality.
+    fn last_trades_since(&self, asset_no: usize) -> Option<i64>;
+
+    /// Clears recorded market trades while retaining allocated capacity and recording state.
     ///
     /// * `asset_no` - Asset number at which this command will be executed. If `None`, all last
     ///   trades in any assets will be cleared.

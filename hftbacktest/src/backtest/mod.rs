@@ -49,6 +49,8 @@ pub mod recorder;
 
 pub mod data;
 mod evs;
+#[cfg(test)]
+mod trade_history_tests;
 
 /// In-memory replay checkpoints.
 pub mod snapshot;
@@ -124,6 +126,8 @@ pub struct L2AssetBuilder<LM, AT, QM, MD, FM> {
     fee_model: Option<FM>,
     exch_kind: ExchangeKind,
     last_trades_cap: usize,
+    record_trades: bool,
+    trade_horizon: Option<std::time::Duration>,
     queue_model: Option<QM>,
     depth_builder: Option<Box<dyn Fn() -> MD>>,
     tick_sizes: Option<rules::TickSizeSchedule>,
@@ -148,6 +152,8 @@ where
             fee_model: None,
             exch_kind: ExchangeKind::NoPartialFillExchange,
             last_trades_cap: 0,
+            record_trades: false,
+            trade_horizon: None,
             queue_model: None,
             depth_builder: None,
             tick_sizes: None,
@@ -208,11 +214,28 @@ where
         Self { exch_kind, ..self }
     }
 
-    /// Sets the initial capacity of the vector storing the last market trades.
-    /// The default value is `0`, indicating that no last trades are stored.
+    /// Sets trade buffer preallocation, independently of recording and retention.
     pub fn last_trades_capacity(self, capacity: usize) -> Self {
         Self {
             last_trades_cap: capacity,
+            ..self
+        }
+    }
+
+    /// Enables or disables market trade recording (disabled by default).
+    pub fn record_trades(self, enabled: bool) -> Self {
+        Self {
+            record_trades: enabled,
+            ..self
+        }
+    }
+
+    /// Retains trades in `(now - horizon, now]` using local receipt time.
+    /// `None` (the default) retains all trades until explicitly cleared.
+    /// A zero horizon retains no trades. This does not enable recording.
+    pub fn last_trades_horizon(self, horizon: Option<std::time::Duration>) -> Self {
+        Self {
+            trade_horizon: horizon,
             ..self
         }
     }
@@ -318,12 +341,15 @@ where
 
         let (order_e2l, order_l2e) = order_bus(order_latency);
 
-        let local = prepare_local(Local::new(
-            create_depth(),
-            State::new(asset_type, fee_model),
-            self.last_trades_cap,
-            order_l2e,
-        ));
+        let local = prepare_local(
+            Local::new(
+                create_depth(),
+                State::new(asset_type, fee_model),
+                self.last_trades_cap,
+                order_l2e,
+            )
+            .configure_trades(self.record_trades, self.trade_horizon),
+        );
 
         let queue_model = self
             .queue_model
@@ -574,11 +600,20 @@ where
         self.goto::<false>(UNTIL_END_OF_DATA, WaitOrderResponse::None)
     }
 
+    fn advance_trade_time(&mut self, timestamp: i64) {
+        self.cur_ts = timestamp;
+        for local in &mut self.local {
+            local.advance_trade_time(timestamp);
+        }
+    }
+
     fn goto<const WAIT_NEXT_FEED: bool>(
         &mut self,
         timestamp: i64,
         wait_order_response: WaitOrderResponse,
     ) -> Result<ElapseResult, BacktestError> {
+        self.advance_trade_time(self.cur_ts);
+        let mut last_timestamp = self.cur_ts;
         let mut result = ElapseResult::Ok;
         let mut timestamp = timestamp;
         for (asset_no, local) in self.local.iter().enumerate() {
@@ -591,9 +626,10 @@ where
             match self.evs.next() {
                 Some(ev) => {
                     if ev.timestamp > timestamp {
-                        self.cur_ts = timestamp;
+                        self.advance_trade_time(timestamp);
                         return Ok(result);
                     }
+                    last_timestamp = ev.timestamp;
                     match ev.kind {
                         EventIntentKind::LocalData => {
                             let local = unsafe { self.local.get_unchecked_mut(ev.asset_no) };
@@ -678,6 +714,7 @@ where
                     }
                 }
                 None => {
+                    self.advance_trade_time(last_timestamp);
                     return Ok(ElapseResult::EndOfData);
                 }
             }
@@ -715,8 +752,12 @@ where
         self.local.get(asset_no).unwrap().depth()
     }
 
-    fn last_trades(&self, asset_no: usize) -> &[Event] {
+    fn last_trades(&self, asset_no: usize) -> std::collections::vec_deque::Iter<'_, Event> {
         self.local.get(asset_no).unwrap().last_trades()
+    }
+
+    fn last_trades_since(&self, asset_no: usize) -> Option<i64> {
+        self.local.get(asset_no).unwrap().last_trades_since()
     }
 
     #[inline]
