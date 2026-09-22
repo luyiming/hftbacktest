@@ -3,7 +3,7 @@ use crate::{
         assettype::AssetType,
         models::{FeeModel, Fill},
     },
-    types::{Order, StateValues},
+    types::{OrderFill, Side, StateValues},
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
@@ -39,36 +39,26 @@ where
     }
 
     #[inline]
-    pub fn apply_fill(&mut self, order: &Order) {
-        self.apply_fill_qty_price(
-            order,
-            order.exec_qty,
-            order
-                .latest_exec_price()
-                .to_f64()
-                .expect("fill price should fit f64"),
-        );
-    }
-
-    #[inline]
-    pub(crate) fn apply_fill_qty_price(
-        &mut self,
-        order: &Order,
-        exec_qty: Decimal,
-        exec_price: f64,
-    ) {
-        let exec_qty_f64 = exec_qty.to_f64().expect("fill quantity should fit f64");
+    pub fn apply_fill(&mut self, side: Side, order_fill: &OrderFill) {
+        let exec_qty_f64 = order_fill
+            .qty
+            .to_f64()
+            .expect("fill quantity should fit f64");
+        let exec_price = order_fill
+            .price
+            .to_f64()
+            .expect("fill price should fit f64");
         let amount = self.asset_type.amount(exec_price, exec_qty_f64);
         let fill = Fill {
             qty: exec_qty_f64,
             price: exec_price,
             value: amount,
-            maker: order.maker,
-            side: order.side,
+            maker: order_fill.is_maker,
+            side,
         };
         self.state_values.position +=
-            exec_qty * Decimal::from(*AsRef::<f64>::as_ref(&order.side) as i64);
-        self.state_values.balance -= amount * AsRef::<f64>::as_ref(&order.side);
+            order_fill.qty * Decimal::from(*AsRef::<f64>::as_ref(&side) as i64);
+        self.state_values.balance -= amount * AsRef::<f64>::as_ref(&side);
         self.state_values.fee += self.fee_model.amount(&fill);
         self.state_values.num_trades += 1;
         self.state_values.trading_volume += exec_qty_f64;

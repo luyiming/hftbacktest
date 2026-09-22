@@ -14,16 +14,16 @@ use crate::{
         BacktestError,
         data::{DataSource, Reader},
     },
-    types::Order,
+    types::{OrderRequest, OrderUpdate},
 };
 
 /// Provides the order entry latency and the order response latency.
 pub trait LatencyModel {
     /// Returns the order entry latency for the given timestamp and order.
-    fn entry(&mut self, timestamp: i64, order: &Order) -> i64;
+    fn entry(&mut self, timestamp: i64, request: &OrderRequest) -> i64;
 
     /// Returns the order response latency for the given timestamp and order.
-    fn response(&mut self, timestamp: i64, order: &Order) -> i64;
+    fn response(&mut self, timestamp: i64, update: &OrderUpdate) -> i64;
 }
 
 /// Provides constant order latency.
@@ -51,11 +51,11 @@ impl ConstantLatency {
 }
 
 impl LatencyModel for ConstantLatency {
-    fn entry(&mut self, _timestamp: i64, _order: &Order) -> i64 {
+    fn entry(&mut self, _timestamp: i64, _request: &OrderRequest) -> i64 {
         self.entry_latency
     }
 
-    fn response(&mut self, _timestamp: i64, _order: &Order) -> i64 {
+    fn response(&mut self, _timestamp: i64, _update: &OrderUpdate) -> i64 {
         self.response_latency
     }
 }
@@ -179,7 +179,7 @@ impl IntpOrderLatency {
 }
 
 impl LatencyModel for IntpOrderLatency {
-    fn entry(&mut self, timestamp: i64, _order: &Order) -> i64 {
+    fn entry(&mut self, timestamp: i64, _request: &OrderRequest) -> i64 {
         let first_row = &self.data[0];
         if timestamp < first_row.req_ts {
             return first_row.exch_ts - first_row.req_ts;
@@ -244,7 +244,7 @@ impl LatencyModel for IntpOrderLatency {
         }
     }
 
-    fn response(&mut self, timestamp: i64, _order: &Order) -> i64 {
+    fn response(&mut self, timestamp: i64, _update: &OrderUpdate) -> i64 {
         let first_row = &self.data[0];
         if timestamp < first_row.exch_ts {
             return first_row.resp_ts - first_row.exch_ts;

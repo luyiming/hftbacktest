@@ -189,18 +189,14 @@ impl AsRef<str> for Side {
     }
 }
 
-/// Order status
+/// Exchange-confirmed order status.
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 #[repr(u8)]
-pub enum Status {
-    None = 0,
-    New = 1,
-    Expired = 2,
-    Filled = 3,
-    Canceled = 4,
-    PartiallyFilled = 5,
-    Rejected = 6,
-    Replaced = 7,
+pub enum OrderStatus {
+    Open = 0,
+    Filled = 1,
+    Canceled = 2,
+    Expired = 3,
 }
 
 /// Time In Force
@@ -310,24 +306,133 @@ impl AnyClone for () {
     }
 }
 
-/// Order
+/// A single simulated execution of an order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OrderFill {
+    pub price: Decimal,
+    pub qty: Decimal,
+    pub exch_timestamp: i64,
+    pub is_maker: bool,
+}
+
+/// Order request kind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OrderRequestKind {
+    New,
+    Modify,
+    Cancel,
+}
+
+/// A request sent from the local model to the exchange model.
+#[derive(Clone, Debug)]
+pub enum OrderRequest {
+    New {
+        request_id: u64,
+        local_timestamp: i64,
+        order: NewOrder,
+    },
+    Modify {
+        request_id: u64,
+        local_timestamp: i64,
+        order_id: OrderId,
+        price: Decimal,
+        price_match: PriceMatch,
+        qty: Decimal,
+    },
+    Cancel {
+        request_id: u64,
+        local_timestamp: i64,
+        order_id: OrderId,
+    },
+}
+
+impl OrderRequest {
+    pub fn request_id(&self) -> u64 {
+        match self {
+            Self::New { request_id, .. }
+            | Self::Modify { request_id, .. }
+            | Self::Cancel { request_id, .. } => *request_id,
+        }
+    }
+
+    pub fn order_id(&self) -> OrderId {
+        match self {
+            Self::New { order, .. } => order.order_id,
+            Self::Modify { order_id, .. } | Self::Cancel { order_id, .. } => *order_id,
+        }
+    }
+
+    pub fn local_timestamp(&self) -> i64 {
+        match self {
+            Self::New {
+                local_timestamp, ..
+            }
+            | Self::Modify {
+                local_timestamp, ..
+            }
+            | Self::Cancel {
+                local_timestamp, ..
+            } => *local_timestamp,
+        }
+    }
+
+    pub fn kind(&self) -> OrderRequestKind {
+        match self {
+            Self::New { .. } => OrderRequestKind::New,
+            Self::Modify { .. } => OrderRequestKind::Modify,
+            Self::Cancel { .. } => OrderRequestKind::Cancel,
+        }
+    }
+}
+
+/// Result of an order request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RequestOutcome {
+    Accepted,
+    Rejected,
+}
+
+/// Correlates an exchange response with a local request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RequestResult {
+    pub request_id: u64,
+    pub local_timestamp: i64,
+    pub kind: OrderRequestKind,
+    pub outcome: RequestOutcome,
+}
+
+/// Exchange-confirmed mutable order state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OrderState {
+    pub side: Side,
+    pub order_type: OrdType,
+    pub time_in_force: TimeInForce,
+    pub price: Decimal,
+    pub price_match: PriceMatch,
+    pub qty: Decimal,
+    pub filled: Decimal,
+    pub status: OrderStatus,
+}
+
+/// An incremental exchange response sent to the local model.
+#[derive(Clone, Debug)]
+pub struct OrderUpdate {
+    pub order_id: OrderId,
+    pub exch_timestamp: i64,
+    pub fills: Vec<OrderFill>,
+    pub state: Option<OrderState>,
+    pub request_result: Option<RequestResult>,
+}
+
+/// An exchange-confirmed order and its fill history.
 #[derive(Clone)]
 pub struct Order {
     /// Total order quantity, including the cumulative executed quantity.
     pub qty: Decimal,
-    /// The quantity of this order that has not yet been executed. It represents the remaining
-    /// quantity that is still open or active in the market after any partial fills.
-    pub leaves_qty: Decimal,
-    /// Executed quantity, only available when this order is executed.
-    pub exec_qty: Decimal,
-    /// Latest executed price, only available when this order is executed.
-    pub exec_price: Decimal,
-    /// Cumulative executed quantity.
-    pub cum_exec_qty: Decimal,
-    /// Cumulative executed value.
-    pub cum_exec_value: f64,
-    /// Cumulative number of price levels consumed by taker executions.
-    pub taker_price_level_count: u32,
+    /// Cumulative filled quantity.
+    pub filled: Decimal,
+    /// Fill history in exchange processing order.
+    pub fills: Vec<OrderFill>,
     /// Exact order price.
     pub price: Decimal,
     /// Exchange-side rule used to resolve `price` when the request arrives.
@@ -335,21 +440,12 @@ pub struct Order {
     /// The time at which the exchange processes this order, ideally when the matching engine
     /// processes the order, will be set if the value is available.
     pub exch_timestamp: i64,
-    /// The time at which the local receives this order or sent this order to the exchange.
-    pub local_timestamp: i64,
     pub order_id: u64,
     /// Additional data used for [`QueueModel`](`crate::backtest::models::QueueModel`).
     /// This is only available in backtesting.
     pub q: Box<dyn AnyClone + Send>,
-    /// Whether the order is executed as a maker, only available when this order is executed.
-    pub maker: bool,
     pub order_type: OrdType,
-    /// Request status:
-    ///   * [`Status::New`]: Request to open a new order.
-    ///   * [`Status::Canceled`]: Request to cancel an opened order.
-    ///   * [`Status::Replaced`]: Request to modify an opened order.
-    pub req: Status,
-    pub status: Status,
+    pub status: OrderStatus,
     pub side: Side,
     pub time_in_force: TimeInForce,
 }
@@ -366,23 +462,16 @@ impl Order {
     ) -> Self {
         Self {
             qty,
-            leaves_qty: qty,
+            filled: Decimal::ZERO,
+            fills: Vec::new(),
             price,
             price_match: PriceMatch::None,
             side,
             time_in_force,
             exch_timestamp: 0,
-            status: Status::None,
-            local_timestamp: 0,
-            req: Status::None,
-            exec_price: Decimal::ZERO,
-            exec_qty: Decimal::ZERO,
-            cum_exec_qty: Decimal::ZERO,
-            cum_exec_value: 0.0,
-            taker_price_level_count: 0,
+            status: OrderStatus::Open,
             order_id,
             q: Box::new(()),
-            maker: false,
             order_type,
         }
     }
@@ -392,78 +481,77 @@ impl Order {
         self.price
     }
 
-    /// Returns the executed price, only available when this order is executed.
-    pub fn exec_price(&self) -> f64 {
-        if !self.cum_exec_qty.is_zero() {
-            self.cum_exec_value
-                / rust_decimal::prelude::ToPrimitive::to_f64(&self.cum_exec_qty)
-                    .expect("executed quantity should be representable as f64")
+    /// Returns the quantity that has not filled.
+    pub fn remaining(&self) -> Decimal {
+        self.qty - self.filled
+    }
+
+    /// Returns the exact cumulative `price * quantity` of all fills.
+    pub fn filled_value(&self) -> Decimal {
+        self.fills.iter().map(|fill| fill.price * fill.qty).sum()
+    }
+
+    /// Returns the volume-weighted average fill price.
+    pub fn average_fill_price(&self) -> Option<Decimal> {
+        (!self.filled.is_zero()).then(|| self.filled_value() / self.filled)
+    }
+
+    /// Returns whether part, but not all, of the order has filled.
+    pub fn is_partially_filled(&self) -> bool {
+        self.filled > Decimal::ZERO && self.filled < self.qty
+    }
+
+    /// Returns the number of taker fills produced while walking price levels.
+    pub fn taker_fill_count(&self) -> u32 {
+        self.fills
+            .iter()
+            .filter(|fill| !fill.is_maker)
+            .count()
+            .try_into()
+            .expect("fill count should fit u32")
+    }
+
+    pub(crate) fn apply_fill(&mut self, fill: OrderFill) {
+        assert!(fill.qty > Decimal::ZERO);
+        assert!(self.filled + fill.qty <= self.qty);
+        self.filled += fill.qty;
+        self.exch_timestamp = fill.exch_timestamp;
+        self.fills.push(fill);
+        self.status = if self.filled == self.qty {
+            OrderStatus::Filled
         } else {
-            rust_decimal::prelude::ToPrimitive::to_f64(&self.latest_exec_price())
-                .expect("executed price should be representable as f64")
+            OrderStatus::Open
+        };
+    }
+
+    pub(crate) fn state(&self) -> OrderState {
+        OrderState {
+            side: self.side,
+            order_type: self.order_type,
+            time_in_force: self.time_in_force,
+            price: self.price,
+            price_match: self.price_match,
+            qty: self.qty,
+            filled: self.filled,
+            status: self.status,
         }
     }
 
-    /// Returns the latest fill price.
-    pub(crate) fn latest_exec_price(&self) -> Decimal {
-        self.exec_price
-    }
-
-    /// Returns whether this order is cancelable.
-    pub fn cancellable(&self) -> bool {
-        (self.status == Status::New || self.status == Status::PartiallyFilled)
-            && self.req == Status::None
+    pub(crate) fn apply_state(&mut self, state: &OrderState, timestamp: i64) {
+        assert_eq!(self.filled, state.filled);
+        assert_eq!(self.side, state.side);
+        assert_eq!(self.order_type, state.order_type);
+        assert_eq!(self.time_in_force, state.time_in_force);
+        self.price = state.price;
+        self.price_match = state.price_match;
+        self.qty = state.qty;
+        self.status = state.status;
+        self.exch_timestamp = timestamp;
     }
 
     /// Returns whether this order is active in the market.
     pub fn active(&self) -> bool {
-        self.status == Status::New || self.status == Status::PartiallyFilled
-    }
-
-    /// Returns whether this order has an ongoing request.
-    pub fn pending(&self) -> bool {
-        self.req != Status::None
-    }
-
-    /// Updates this order with the response produced by a backtesting processor.
-    pub fn update(&mut self, order: &Order) {
-        //assert!(order.exch_timestamp >= self.exch_timestamp);
-        if order.exch_timestamp < self.exch_timestamp {
-            println!(
-                "Warning: Perhaps an inaccurate order response update occurs: an order previously \
-                updated by a later exchange timestamp is updated by an earlier one. \
-                This issue is primarily caused by incorrect or inconsistent timestamp ordering \
-                across the files.\n \
-                order={:?}, \
-                response={:?}",
-                self, order
-            );
-        }
-
-        self.qty = order.qty;
-        self.leaves_qty = order.leaves_qty;
-        self.price = order.price;
-        self.price_match = order.price_match;
-        self.side = order.side;
-        self.time_in_force = order.time_in_force;
-
-        if order.exch_timestamp > 0 {
-            self.exch_timestamp = order.exch_timestamp;
-        }
-        self.status = order.status;
-        // if order.local_timestamp > 0 {
-        //     self.local_timestamp = order.local_timestamp;
-        // }
-        self.req = order.req;
-        self.exec_price = order.exec_price;
-        self.exec_qty = order.exec_qty;
-        self.cum_exec_qty = order.cum_exec_qty;
-        self.cum_exec_value = order.cum_exec_value;
-        self.taker_price_level_count = order.taker_price_level_count;
-        self.order_id = order.order_id;
-        self.q = order.q.clone();
-        self.maker = order.maker;
-        self.order_type = order.order_type;
+        self.status == OrderStatus::Open
     }
 }
 
@@ -471,22 +559,15 @@ impl Debug for Order {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Order")
             .field("qty", &self.qty)
-            .field("leaves_qty", &self.leaves_qty)
+            .field("filled", &self.filled)
+            .field("fills", &self.fills)
             .field("price", &self.price)
             .field("price_match", &self.price_match)
             .field("side", &self.side)
             .field("time_in_force", &self.time_in_force)
             .field("exch_timestamp", &self.exch_timestamp)
             .field("status", &self.status)
-            .field("local_timestamp", &self.local_timestamp)
-            .field("req", &self.req)
-            .field("exec_price", &self.exec_price)
-            .field("exec_qty", &self.exec_qty)
-            .field("cum_exec_qty", &self.cum_exec_qty)
-            .field("cum_exec_value", &self.cum_exec_value)
-            .field("taker_price_level_count", &self.taker_price_level_count)
             .field("order_id", &self.order_id)
-            .field("maker", &self.maker)
             .field("order_type", &self.order_type)
             .finish()
     }
@@ -516,8 +597,9 @@ pub enum BuildError {
     Error(#[from] anyhow::Error),
 }
 
-/// Describes an order to submit to the backtester.
-pub struct OrderRequest {
+/// Describes a new order before local request metadata is assigned.
+#[derive(Clone, Debug)]
+pub struct NewOrder {
     pub order_id: u64,
     pub price: Decimal,
     /// If not [`PriceMatch::None`], the exchange ignores `price` and resolves this mode on arrival.
@@ -569,6 +651,16 @@ where
     ///
     /// * `asset_no` - Asset number from which orders will be retrieved.
     fn orders(&self, asset_no: usize) -> &HashMap<OrderId, Order>;
+
+    /// Returns the pending request for an order, if one exists.
+    fn pending_order_request(&self, asset_no: usize, order_id: OrderId) -> Option<&OrderRequest>;
+
+    /// Returns the most recent completed request result for an order.
+    fn last_order_request_result(
+        &self,
+        asset_no: usize,
+        order_id: OrderId,
+    ) -> Option<RequestResult>;
 
     /// Places a buy order.
     ///
@@ -652,7 +744,7 @@ where
     fn submit_order(
         &mut self,
         asset_no: usize,
-        order: OrderRequest,
+        order: NewOrder,
         wait: bool,
     ) -> Result<ElapseResult, Self::Error>;
 
@@ -695,8 +787,7 @@ where
         wait: bool,
     ) -> Result<ElapseResult, Self::Error>;
 
-    /// Clears inactive orders from the local orders whose status is neither [`Status::New`] nor
-    /// [`Status::PartiallyFilled`].
+    /// Clears orders that are no longer open and have no pending request.
     fn clear_inactive_orders(&mut self, asset_no: Option<usize>);
 
     /// Waits for the response of the order with the given order ID until timeout.

@@ -23,8 +23,8 @@ use crate::{
     },
     depth::{L2MarketDepth, MarketDepth},
     prelude::{
-        Bot, OrdType, Order, OrderId, OrderRequest, PriceMatch, Side, StateValues, TimeInForce,
-        UNTIL_END_OF_DATA, WaitOrderResponse,
+        Bot, NewOrder, OrdType, Order, OrderId, OrderRequest, PriceMatch, Side, StateValues,
+        TimeInForce, UNTIL_END_OF_DATA, WaitOrderResponse,
     },
     types::{BuildError, ElapseResult, Event},
 };
@@ -739,6 +739,24 @@ where
         self.local.get(asset_no).unwrap().orders()
     }
 
+    fn pending_order_request(&self, asset_no: usize, order_id: OrderId) -> Option<&OrderRequest> {
+        self.local
+            .get(asset_no)
+            .unwrap()
+            .pending_order_request(order_id)
+    }
+
+    fn last_order_request_result(
+        &self,
+        asset_no: usize,
+        order_id: OrderId,
+    ) -> Option<crate::types::RequestResult> {
+        self.local
+            .get(asset_no)
+            .unwrap()
+            .last_order_request_result(order_id)
+    }
+
     #[inline]
     fn submit_buy_order(
         &mut self,
@@ -876,7 +894,7 @@ where
     fn submit_order(
         &mut self,
         asset_no: usize,
-        order: OrderRequest,
+        order: NewOrder,
         wait: bool,
     ) -> Result<ElapseResult, Self::Error> {
         let local = self.local.get_mut(asset_no).unwrap();

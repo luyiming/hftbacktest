@@ -16,7 +16,10 @@ use crate::{
         snapshot::{SnapshotContext, SnapshotError},
     },
     depth::MarketDepth,
-    prelude::{Event, OrdType, Order, OrderId, PriceMatch, Side, StateValues, TimeInForce},
+    prelude::{
+        Event, OrdType, Order, OrderId, OrderRequest, PriceMatch, RequestResult, Side, StateValues,
+        TimeInForce,
+    },
 };
 
 /// Provides local-specific interaction.
@@ -81,9 +84,7 @@ where
     /// * `current_timestamp` - The current backtesting timestamp.
     fn cancel(&mut self, order_id: OrderId, current_timestamp: i64) -> Result<(), BacktestError>;
 
-    /// Clears inactive orders from the local orders whose status is neither
-    /// [`Status::New`](crate::types::Status::New) nor
-    /// [`Status::PartiallyFilled`](crate::types::Status::PartiallyFilled).
+    /// Clears orders that are no longer open and have no pending request.
     fn clear_inactive_orders(&mut self);
 
     /// Returns the position you currently hold.
@@ -97,6 +98,12 @@ where
 
     /// Returns a hash map of order IDs and their corresponding [`Order`]s.
     fn orders(&self) -> &HashMap<OrderId, Order>;
+
+    /// Returns the pending request for an order, if one exists.
+    fn pending_order_request(&self, order_id: OrderId) -> Option<&OrderRequest>;
+
+    /// Returns the most recent completed request result for an order.
+    fn last_order_request_result(&self, order_id: OrderId) -> Option<RequestResult>;
 
     /// Returns the last market trades.
     fn last_trades(&self) -> &[Event];

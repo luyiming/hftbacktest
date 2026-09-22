@@ -1,4 +1,4 @@
-use rust_decimal::{Decimal, prelude::ToPrimitive};
+use rust_decimal::Decimal;
 use std::{
     cell::RefCell,
     cmp::Ordering,
@@ -26,7 +26,8 @@ use crate::{
         EXCH_ASK_DEPTH_CLEAR_EVENT, EXCH_ASK_DEPTH_EVENT, EXCH_ASK_DEPTH_SNAPSHOT_EVENT,
         EXCH_BID_DEPTH_CLEAR_EVENT, EXCH_BID_DEPTH_EVENT, EXCH_BID_DEPTH_SNAPSHOT_EVENT,
         EXCH_BUY_TRADE_EVENT, EXCH_DEPTH_CLEAR_EVENT, EXCH_EVENT, EXCH_SELL_TRADE_EVENT, Event,
-        Order, OrderId, Side, Status, TimeInForce,
+        Order, OrderFill, OrderId, OrderRequest, OrderStatus, OrderUpdate, RequestOutcome,
+        RequestResult, Side, TimeInForce,
     },
 };
 
@@ -160,7 +161,7 @@ where
             Ordering::Greater => {}
             Ordering::Less => {
                 self.filled_orders.push(order.order_id);
-                return self.fill::<true>(order, timestamp, true, order.price, order.leaves_qty);
+                return self.fill::<true>(order, timestamp, true, order.price, order.remaining());
             }
             Ordering::Equal => {
                 // Updates the order's queue position.
@@ -170,9 +171,9 @@ where
                     // q_ahead is negative since is_filled is true and its value represents the
                     // executable quantity of this order after execution in the queue ahead of this
                     // order.
-                    let exec_qty = filled_qty.min(order.leaves_qty);
+                    let exec_qty = filled_qty.min(order.remaining());
                     self.fill::<true>(order, timestamp, true, order.price, exec_qty)?;
-                    if order.status == Status::Filled {
+                    if order.status == OrderStatus::Filled {
                         self.filled_orders.push(order.order_id);
                     }
                     return Ok(());
@@ -192,7 +193,7 @@ where
         match order.price.cmp(&price) {
             Ordering::Greater => {
                 self.filled_orders.push(order.order_id);
-                return self.fill::<true>(order, timestamp, true, order.price, order.leaves_qty);
+                return self.fill::<true>(order, timestamp, true, order.price, order.remaining());
             }
             Ordering::Less => {}
             Ordering::Equal => {
@@ -203,9 +204,9 @@ where
                     // q_ahead is negative since is_filled is true and its value represents the
                     // executable quantity of this order after execution in the queue ahead of this
                     // order.
-                    let exec_qty = filled_qty.min(order.leaves_qty);
+                    let exec_qty = filled_qty.min(order.remaining());
                     self.fill::<true>(order, timestamp, true, order.price, exec_qty)?;
-                    if order.status == Status::Filled {
+                    if order.status == OrderStatus::Filled {
                         self.filled_orders.push(order.order_id);
                     }
                     return Ok(());
@@ -223,40 +224,30 @@ where
         exec_price: Decimal,
         exec_qty: Decimal,
     ) -> Result<(), BacktestError> {
-        if order.status == Status::Expired
-            || order.status == Status::Canceled
-            || order.status == Status::Filled
+        if order.status == OrderStatus::Expired
+            || order.status == OrderStatus::Canceled
+            || order.status == OrderStatus::Filled
         {
             return Err(BacktestError::InvalidOrderStatus);
         }
 
-        order.maker = maker;
-        if maker {
-            order.exec_price = order.price;
-        } else {
-            order.exec_price = exec_price;
-        }
-
-        order.exec_qty = exec_qty;
-        order.cum_exec_qty += exec_qty;
-        order.cum_exec_value += (exec_qty * order.latest_exec_price())
-            .to_f64()
-            .expect("execution value should fit f64");
-        if !maker {
-            order.taker_price_level_count += 1;
-        }
-        order.leaves_qty -= exec_qty;
-        if order.leaves_qty > Decimal::ZERO {
-            order.status = Status::PartiallyFilled;
-        } else {
-            order.status = Status::Filled;
-        }
-        order.exch_timestamp = timestamp;
-
-        self.state.apply_fill(order);
+        let fill = OrderFill {
+            price: if maker { order.price } else { exec_price },
+            qty: exec_qty,
+            exch_timestamp: timestamp,
+            is_maker: maker,
+        };
+        order.apply_fill(fill.clone());
+        self.state.apply_fill(order.side, &fill);
 
         if MAKE_RESPONSE {
-            self.order_e2l.respond(order.clone());
+            self.order_e2l.respond(OrderUpdate {
+                order_id: order.order_id,
+                exch_timestamp: timestamp,
+                fills: vec![fill],
+                state: Some(order.state()),
+                request_result: None,
+            });
         }
         Ok(())
     }
@@ -316,7 +307,7 @@ where
             for order in orders_borrowed.values_mut() {
                 if order.side == Side::Sell && order.price <= new_best_price {
                     self.filled_orders.push(order.order_id);
-                    self.fill::<true>(order, timestamp, true, order.price, order.leaves_qty)?;
+                    self.fill::<true>(order, timestamp, true, order.price, order.remaining())?;
                 }
             }
         }
@@ -335,7 +326,7 @@ where
             for order in orders_borrowed.values_mut() {
                 if order.side == Side::Buy && order.price >= new_best_price {
                     self.filled_orders.push(order.order_id);
-                    self.fill::<true>(order, timestamp, true, order.price, order.leaves_qty)?;
+                    self.fill::<true>(order, timestamp, true, order.price, order.remaining())?;
                 }
             }
         }
@@ -345,7 +336,7 @@ where
 
     fn liquidity(&self, order: &Order) -> (Vec<(Decimal, Decimal)>, Decimal) {
         let mut levels = Vec::new();
-        let mut remaining = order.leaves_qty;
+        let mut remaining = order.remaining();
         let limit = (order.order_type == OrdType::Limit).then_some(order.price);
         let mut visit = |price: Decimal, qty: Decimal| {
             if limit.is_some_and(|limit| match order.side {
@@ -380,11 +371,7 @@ where
 
     fn rest_order(&mut self, order: &mut Order, timestamp: i64) {
         self.queue_model.new_order(order, &self.depth);
-        order.status = if order.cum_exec_qty > Decimal::ZERO {
-            Status::PartiallyFilled
-        } else {
-            Status::New
-        };
+        order.status = OrderStatus::Open;
         let orders_at_price = match order.side {
             Side::Buy => self.buy_orders.entry(order.price).or_default(),
             Side::Sell => self.sell_orders.entry(order.price).or_default(),
@@ -406,12 +393,12 @@ where
             return Err(BacktestError::OrderIdExist);
         }
         if validate_rule && !price_satisfies_rule(order, timestamp, &self.tick_sizes)? {
-            order.status = Status::Expired;
+            order.status = OrderStatus::Expired;
             order.exch_timestamp = timestamp;
             return Ok(());
         }
         let Some(price) = resolve_price_match(order, &self.depth) else {
-            order.status = Status::Expired;
+            order.status = OrderStatus::Expired;
             order.exch_timestamp = timestamp;
             return Ok(());
         };
@@ -427,35 +414,35 @@ where
                     return Ok(());
                 }
                 TimeInForce::FOK | TimeInForce::IOC => {
-                    order.status = Status::Expired;
+                    order.status = OrderStatus::Expired;
                     order.exch_timestamp = timestamp;
                     return Ok(());
                 }
             }
         }
         if order.order_type == OrdType::Limit && order.time_in_force == TimeInForce::GTX {
-            order.status = Status::Expired;
+            order.status = OrderStatus::Expired;
             order.exch_timestamp = timestamp;
             return Ok(());
         }
 
         let (levels, remaining) = self.liquidity(order);
         if order.time_in_force == TimeInForce::FOK && remaining > Decimal::ZERO {
-            order.status = Status::Expired;
+            order.status = OrderStatus::Expired;
             order.exch_timestamp = timestamp;
             return Ok(());
         }
         for (price, exec_qty) in levels {
             self.fill::<false>(order, timestamp, false, price, exec_qty)?;
-            if order.status == Status::Filled {
+            if order.status == OrderStatus::Filled {
                 return Ok(());
             }
         }
         if order.order_type == OrdType::Limit && order.time_in_force == TimeInForce::GTC {
-            let leaves_qty = order.leaves_qty;
-            return self.fill::<false>(order, timestamp, false, order.price, leaves_qty);
+            let remaining = order.remaining();
+            return self.fill::<false>(order, timestamp, false, order.price, remaining);
         }
-        order.status = Status::Expired;
+        order.status = OrderStatus::Expired;
         order.exch_timestamp = timestamp;
         Ok(())
     }
@@ -463,69 +450,50 @@ where
         self.ack_new_checked(order, timestamp, true)
     }
 
-    fn ack_cancel(&mut self, order: &mut Order, timestamp: i64) -> Result<(), BacktestError> {
-        let exch_order = {
-            let mut order_borrowed = self.orders.borrow_mut();
-            order_borrowed.remove(&order.order_id)
-        };
-
-        if exch_order.is_none() {
-            order.req = Status::Rejected;
-            order.exch_timestamp = timestamp;
-            return Ok(());
-        }
-
-        let exch_order = exch_order.unwrap();
-        let _ = std::mem::replace(order, exch_order);
-
-        // Deletes the order.
+    fn ack_cancel(&mut self, order_id: OrderId, timestamp: i64) -> Option<Order> {
+        let mut order = self.orders.borrow_mut().remove(&order_id)?;
         if order.side == Side::Buy {
             self.buy_orders
                 .get_mut(&order.price)
-                .unwrap()
+                .expect("buy price level should contain open order")
                 .remove(&order.order_id);
         } else {
             self.sell_orders
                 .get_mut(&order.price)
-                .unwrap()
+                .expect("sell price level should contain open order")
                 .remove(&order.order_id);
         }
-        order.status = Status::Canceled;
+        order.status = OrderStatus::Canceled;
         order.exch_timestamp = timestamp;
-        Ok(())
+        Some(order)
     }
 
-    fn ack_modify(&mut self, order: &mut Order, timestamp: i64) -> Result<(), BacktestError> {
-        let unchanged_price = self
-            .orders
-            .borrow()
-            .get(&order.order_id)
-            .is_some_and(|existing| existing.price == order.price);
-        if !unchanged_price && !price_satisfies_rule(order, timestamp, &self.tick_sizes)? {
-            order.req = Status::Rejected;
-            order.exch_timestamp = timestamp;
-            return Ok(());
-        }
-        let requested_price = resolve_price_match(order, &self.depth);
-        let requested_price_match = order.price_match;
-        let requested_qty = order.qty;
-        let request_timestamp = order.local_timestamp;
-
-        let Some(requested_price) = requested_price else {
-            order.req = Status::Rejected;
-            order.exch_timestamp = timestamp;
-            return Ok(());
+    fn ack_modify(
+        &mut self,
+        order_id: OrderId,
+        price: Decimal,
+        price_match: crate::types::PriceMatch,
+        qty: Decimal,
+        timestamp: i64,
+    ) -> Result<(Option<Order>, Vec<OrderFill>, bool), BacktestError> {
+        let Some(existing) = self.orders.borrow().get(&order_id).cloned() else {
+            return Ok((None, Vec::new(), false));
         };
-
-        self.ack_cancel(order, timestamp)?;
-        if order.req == Status::Rejected {
-            return Ok(());
+        let previous_fill_count = existing.fills.len();
+        let mut candidate = existing.clone();
+        let unchanged_price = candidate.price == price;
+        candidate.price = price;
+        candidate.price_match = price_match;
+        candidate.qty = qty;
+        if !unchanged_price && !price_satisfies_rule(&candidate, timestamp, &self.tick_sizes)? {
+            return Ok((Some(existing), Vec::new(), false));
         }
-        order.local_timestamp = request_timestamp;
-        order.price_match = requested_price_match;
-        let crosses_book = order.order_type == OrdType::Limit
-            && order.time_in_force == TimeInForce::GTX
-            && match order.side {
+        let Some(requested_price) = resolve_price_match(&candidate, &self.depth) else {
+            return Ok((Some(existing), Vec::new(), false));
+        };
+        let crosses_book = candidate.order_type == OrdType::Limit
+            && candidate.time_in_force == TimeInForce::GTX
+            && match candidate.side {
                 Side::Buy => self
                     .depth
                     .best_ask()
@@ -535,22 +503,20 @@ where
                     .best_bid()
                     .is_some_and(|bid| requested_price <= bid),
             };
-        if (order.cum_exec_qty > Decimal::ZERO && requested_qty <= order.cum_exec_qty)
-            || crosses_book
-        {
-            return Ok(());
+        let mut order = self
+            .ack_cancel(order_id, timestamp)
+            .expect("validated modify target should remain open");
+        if (order.filled > Decimal::ZERO && qty <= order.filled) || crosses_book {
+            return Ok((Some(order), Vec::new(), true));
         }
 
         order.price = requested_price;
-        order.qty = requested_qty;
-        order.leaves_qty = requested_qty - order.cum_exec_qty;
-        order.status = if order.cum_exec_qty > Decimal::ZERO {
-            Status::PartiallyFilled
-        } else {
-            Status::New
-        };
-        self.ack_new_checked(order, timestamp, false)?;
-        Ok(())
+        order.price_match = price_match;
+        order.qty = qty;
+        order.status = OrderStatus::Open;
+        self.ack_new_checked(&mut order, timestamp, false)?;
+        let fills = order.fills[previous_fill_count..].to_vec();
+        Ok((Some(order), fills, true))
     }
 }
 
@@ -650,26 +616,59 @@ where
         timestamp: i64,
         _wait_resp_order_id: Option<OrderId>,
     ) -> Result<bool, BacktestError> {
-        while let Some(mut order) = self.order_e2l.receive(timestamp) {
-            // Processes a new order.
-            if order.req == Status::New {
-                order.req = Status::None;
-                self.ack_new(&mut order, timestamp)?;
-            }
-            // Processes a cancel order.
-            else if order.req == Status::Canceled {
-                order.req = Status::None;
-                self.ack_cancel(&mut order, timestamp)?;
-            }
-            // Processes a modify order.
-            else if order.req == Status::Replaced {
-                order.req = Status::None;
-                self.ack_modify(&mut order, timestamp)?;
-            } else {
-                return Err(BacktestError::InvalidOrderRequest);
-            }
-            // Makes the response.
-            self.order_e2l.respond(order);
+        while let Some(request) = self.order_e2l.receive(timestamp) {
+            let request_id = request.request_id();
+            let local_timestamp = request.local_timestamp();
+            let order_id = request.order_id();
+            let kind = request.kind();
+            let (order, fills, accepted) = match request {
+                OrderRequest::New { order: new, .. } => {
+                    let mut order = Order::new(
+                        new.order_id,
+                        new.price,
+                        new.qty,
+                        new.side,
+                        new.order_type,
+                        new.time_in_force,
+                    );
+                    order.price_match = new.price_match;
+                    self.ack_new(&mut order, timestamp)?;
+                    let fills = order.fills.clone();
+                    (Some(order), fills, true)
+                }
+                OrderRequest::Cancel { order_id, .. } => {
+                    let order = self.ack_cancel(order_id, timestamp);
+                    let accepted = order.is_some();
+                    (order, Vec::new(), accepted)
+                }
+                OrderRequest::Modify {
+                    order_id,
+                    price,
+                    price_match,
+                    qty,
+                    ..
+                } => {
+                    let (order, fills, accepted) =
+                        self.ack_modify(order_id, price, price_match, qty, timestamp)?;
+                    (order, fills, accepted)
+                }
+            };
+            self.order_e2l.respond(OrderUpdate {
+                order_id,
+                exch_timestamp: timestamp,
+                fills,
+                state: order.as_ref().map(Order::state),
+                request_result: Some(RequestResult {
+                    request_id,
+                    local_timestamp,
+                    kind,
+                    outcome: if accepted {
+                        RequestOutcome::Accepted
+                    } else {
+                        RequestOutcome::Rejected
+                    },
+                }),
+            });
         }
         Ok(false)
     }
@@ -763,7 +762,7 @@ mod tests {
             TimeInForce::GTC,
         );
         exchange.ack_new(&mut order, 0).unwrap();
-        assert_eq!(order.status, Status::New);
+        assert_eq!(order.status, OrderStatus::Open);
 
         exchange
             .process(&Event {
@@ -791,7 +790,7 @@ mod tests {
             TimeInForce::GTC,
         );
         exchange.ack_new(&mut order, 0).unwrap();
-        assert_eq!(order.status, Status::New);
+        assert_eq!(order.status, OrderStatus::Open);
 
         exchange
             .process(&Event {
@@ -887,8 +886,8 @@ mod tests {
         exchange
             .ack_new(&mut insufficient, 0)
             .expect("insufficient FOK order should be processed");
-        assert_eq!(insufficient.status, Status::Expired);
-        assert_eq!(insufficient.cum_exec_qty, Decimal::ZERO);
+        assert_eq!(insufficient.status, OrderStatus::Expired);
+        assert_eq!(insufficient.filled, Decimal::ZERO);
         assert_eq!(exchange.state.values().position, Decimal::ZERO);
 
         let mut sufficient = Order::new(
@@ -902,8 +901,8 @@ mod tests {
         exchange
             .ack_new(&mut sufficient, 0)
             .expect("sufficient FOK order should be processed");
-        assert_eq!(sufficient.status, Status::Filled);
-        assert_eq!(sufficient.cum_exec_qty, Decimal::from(3));
+        assert_eq!(sufficient.status, OrderStatus::Filled);
+        assert_eq!(sufficient.filled, Decimal::from(3));
         assert_eq!(exchange.state.values().position, Decimal::from(3));
         assert_eq!(exchange.state.values().num_trades, 2);
     }
@@ -912,10 +911,37 @@ mod tests {
     fn multilevel_fok_ioc_and_gtc_match_both_sides() {
         for side in [Side::Buy, Side::Sell] {
             for (time_in_force, qty, status, filled, trades, levels, buy_value, sell_value) in [
-                (TimeInForce::FOK, 5, Status::Expired, 0, 0, 0, 0.0, 0.0),
-                (TimeInForce::FOK, 4, Status::Filled, 4, 2, 2, 402.0, 394.0),
-                (TimeInForce::IOC, 5, Status::Expired, 4, 2, 2, 402.0, 394.0),
-                (TimeInForce::GTC, 5, Status::Filled, 5, 3, 3, 503.0, 492.0),
+                (TimeInForce::FOK, 5, OrderStatus::Expired, 0, 0, 0, 0.0, 0.0),
+                (
+                    TimeInForce::FOK,
+                    4,
+                    OrderStatus::Filled,
+                    4,
+                    2,
+                    2,
+                    402.0,
+                    394.0,
+                ),
+                (
+                    TimeInForce::IOC,
+                    5,
+                    OrderStatus::Expired,
+                    4,
+                    2,
+                    2,
+                    402.0,
+                    394.0,
+                ),
+                (
+                    TimeInForce::GTC,
+                    5,
+                    OrderStatus::Filled,
+                    5,
+                    3,
+                    3,
+                    503.0,
+                    492.0,
+                ),
             ] {
                 let mut exchange = exchange();
                 for (price, level_qty) in [(100, 2), (101, 2)] {
@@ -951,10 +977,14 @@ mod tests {
                     sell_value
                 };
                 assert_eq!(order.status, status, "{side:?} {time_in_force:?}");
-                assert_eq!(order.cum_exec_qty, Decimal::from(filled));
-                assert_eq!(order.leaves_qty, Decimal::from(qty - filled));
-                assert_eq!(order.cum_exec_value, expected_value);
-                assert_eq!(order.taker_price_level_count, levels);
+                assert_eq!(order.filled, Decimal::from(filled));
+                assert_eq!(order.remaining(), Decimal::from(qty - filled));
+                assert_eq!(
+                    order.filled_value(),
+                    Decimal::from_f64_retain(expected_value)
+                        .expect("expected value should be an exact decimal")
+                );
+                assert_eq!(order.taker_fill_count(), levels);
                 assert_eq!(exchange.state.values().num_trades, trades);
                 assert_eq!(
                     exchange.state.values().position,
@@ -988,10 +1018,10 @@ mod tests {
             TimeInForce::FOK,
         );
         exchange.ack_new(&mut buy, 10).expect("buy should match");
-        assert_eq!(buy.status, Status::Filled);
-        assert_eq!(buy.cum_exec_qty, Decimal::from(3));
-        assert_eq!(buy.cum_exec_value, 300.25);
-        assert_eq!(buy.taker_price_level_count, 2);
+        assert_eq!(buy.status, OrderStatus::Filled);
+        assert_eq!(buy.filled, Decimal::from(3));
+        assert_eq!(buy.filled_value(), Decimal::new(30025, 2));
+        assert_eq!(buy.taker_fill_count(), 2);
 
         let mut sell = Order::new(
             2,
@@ -1002,10 +1032,10 @@ mod tests {
             TimeInForce::IOC,
         );
         exchange.ack_new(&mut sell, 10).expect("sell should match");
-        assert_eq!(sell.status, Status::Filled);
-        assert_eq!(sell.cum_exec_qty, Decimal::from(3));
-        assert_eq!(sell.cum_exec_value, 299.75);
-        assert_eq!(sell.taker_price_level_count, 2);
+        assert_eq!(sell.status, OrderStatus::Filled);
+        assert_eq!(sell.filled, Decimal::from(3));
+        assert_eq!(sell.filled_value(), Decimal::new(29975, 2));
+        assert_eq!(sell.taker_fill_count(), 2);
         assert_eq!(exchange.state.values().position, Decimal::ZERO);
         assert_eq!(exchange.state.values().num_trades, 4);
     }
@@ -1013,24 +1043,26 @@ mod tests {
     #[test]
     fn delayed_orders_use_rule_at_exchange_arrival() {
         for (local_timestamp, price, expected_status) in [
-            (8, Decimal::new(10005, 2), Status::New),
-            (9, Decimal::new(10005, 2), Status::Expired),
-            (10, Decimal::new(10005, 2), Status::Expired),
-            (9, Decimal::new(10010, 2), Status::New),
+            (8, Decimal::new(10005, 2), OrderStatus::Open),
+            (9, Decimal::new(10005, 2), OrderStatus::Expired),
+            (10, Decimal::new(10005, 2), OrderStatus::Expired),
+            (9, Decimal::new(10010, 2), OrderStatus::Open),
         ] {
             let (mut exchange, mut local) =
                 exchange_with(switching_schedule(), ConstantLatency::new(1, 2));
-            let mut order = Order::new(
-                1,
-                price,
-                Decimal::ONE,
-                Side::Buy,
-                OrdType::Limit,
-                TimeInForce::GTC,
-            );
-            order.local_timestamp = local_timestamp;
-            order.req = Status::New;
-            local.request(order, |_| panic!("positive latency should reach exchange"));
+            local.request(OrderRequest::New {
+                request_id: 0,
+                local_timestamp,
+                order: crate::types::NewOrder {
+                    order_id: 1,
+                    price,
+                    price_match: crate::types::PriceMatch::None,
+                    qty: Decimal::ONE,
+                    side: Side::Buy,
+                    order_type: OrdType::Limit,
+                    time_in_force: TimeInForce::GTC,
+                },
+            });
             let arrival = local_timestamp + 1;
             assert_eq!(exchange.earliest_recv_order_timestamp(), arrival);
             exchange
@@ -1040,12 +1072,17 @@ mod tests {
             let response = local
                 .receive(arrival + 2)
                 .expect("exchange response should arrive after response latency");
-            assert_eq!(response.status, expected_status);
+            assert_eq!(
+                response
+                    .state
+                    .expect("accepted request should include order state")
+                    .status,
+                expected_status
+            );
             assert_eq!(response.exch_timestamp, arrival);
-            assert_eq!(response.local_timestamp, local_timestamp);
             assert_eq!(
                 exchange.orders.borrow().len(),
-                usize::from(expected_status == Status::New)
+                usize::from(expected_status == OrderStatus::Open)
             );
         }
     }

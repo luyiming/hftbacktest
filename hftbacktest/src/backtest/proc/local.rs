@@ -1,5 +1,5 @@
-use rust_decimal::{Decimal, prelude::ToPrimitive};
-use std::collections::{HashMap, hash_map::Entry};
+use rust_decimal::Decimal;
+use std::collections::HashMap;
 
 use crate::{
     backtest::{
@@ -15,8 +15,8 @@ use crate::{
     types::{
         Event, LOCAL_ASK_DEPTH_CLEAR_EVENT, LOCAL_ASK_DEPTH_EVENT, LOCAL_ASK_DEPTH_SNAPSHOT_EVENT,
         LOCAL_BID_DEPTH_CLEAR_EVENT, LOCAL_BID_DEPTH_EVENT, LOCAL_BID_DEPTH_SNAPSHOT_EVENT,
-        LOCAL_DEPTH_CLEAR_EVENT, LOCAL_EVENT, LOCAL_TRADE_EVENT, OrdType, Order, OrderId,
-        PriceMatch, Side, StateValues, Status, TimeInForce,
+        LOCAL_DEPTH_CLEAR_EVENT, LOCAL_EVENT, LOCAL_TRADE_EVENT, NewOrder, OrdType, Order, OrderId,
+        OrderRequest, PriceMatch, RequestResult, Side, StateValues, TimeInForce,
     },
 };
 
@@ -29,6 +29,9 @@ where
     FM: FeeModel,
 {
     orders: HashMap<OrderId, Order>,
+    pending_requests: HashMap<OrderId, OrderRequest>,
+    last_request_results: HashMap<OrderId, RequestResult>,
+    next_request_id: u64,
     order_l2e: LocalToExch<LM>,
     depth: MD,
     state: State<AT, FM>,
@@ -54,6 +57,9 @@ where
     ) -> Self {
         Self {
             orders: Default::default(),
+            pending_requests: Default::default(),
+            last_request_results: Default::default(),
+            next_request_id: 0,
             order_l2e,
             depth,
             state,
@@ -77,6 +83,9 @@ where
             trades.extend_from_slice(&source.trades);
             Box::new(Self {
                 orders: source.orders.clone(),
+                pending_requests: source.pending_requests.clone(),
+                last_request_results: source.last_request_results.clone(),
+                next_request_id: source.next_request_id,
                 order_l2e: source.order_l2e.snapshot(context),
                 depth: source.depth.clone(),
                 state: source.state.clone(),
@@ -99,64 +108,68 @@ where
         Handler: FnMut(&Order),
     {
         let mut wait_resp_order_received = false;
-        while let Some(order) = self.order_l2e.receive(timestamp) {
-            // Updates the order latency only if it has a valid exchange timestamp. When the
-            // order is rejected before it reaches the matching engine, it has no exchange
-            // timestamp. This situation occurs in crypto exchanges.
-            if order.exch_timestamp > 0 {
-                self.last_order_latency =
-                    Some((order.local_timestamp, order.exch_timestamp, timestamp));
-            }
-
+        while let Some(update) = self.order_l2e.receive(timestamp) {
             if let Some(wait_resp_order_id) = wait_resp_order_id
-                && order.order_id == wait_resp_order_id
+                && update.order_id == wait_resp_order_id
+                && update.request_result.is_some()
             {
                 wait_resp_order_received = true;
             }
 
-            let (prev_cum_exec_qty, prev_cum_exec_value) = self
-                .orders
-                .get(&order.order_id)
-                .map(|order| (order.cum_exec_qty, order.cum_exec_value))
-                .unwrap_or((Decimal::ZERO, 0.0));
-            let exec_qty = order.cum_exec_qty - prev_cum_exec_qty;
-            if exec_qty > Decimal::ZERO {
-                let exec_value = order.cum_exec_value - prev_cum_exec_value;
-                let exec_qty_f64 = exec_qty.to_f64().expect("fill quantity should fit f64");
-                self.state
-                    .apply_fill_qty_price(&order, exec_qty, exec_value / exec_qty_f64);
+            let pending = update.request_result.and_then(|result| {
+                self.pending_requests
+                    .get(&update.order_id)
+                    .filter(|request| request.request_id() == result.request_id)
+                    .cloned()
+            });
+            if let Some(request) = &pending {
+                self.last_order_latency =
+                    Some((request.local_timestamp(), update.exch_timestamp, timestamp));
             }
-            // Applies the received order response to the local orders.
-            match self.orders.entry(order.order_id) {
-                Entry::Occupied(mut entry) => {
-                    let local_order = entry.get_mut();
-                    if order.req == Status::Rejected {
-                        if order.local_timestamp == local_order.local_timestamp {
-                            if local_order.req == Status::New {
-                                local_order.req = Status::None;
-                                local_order.status = Status::Expired;
-                            } else {
-                                local_order.req = Status::None;
-                            }
-                        }
-                    } else {
-                        local_order.update(&order);
-                    }
-                    if USE_HANDLER {
-                        handler(&order);
-                    }
+
+            if update.state.is_some() && !self.orders.contains_key(&update.order_id) {
+                let Some(OrderRequest::New { order: new, .. }) = pending.as_ref() else {
+                    return Err(BacktestError::InvalidOrderRequest);
+                };
+                let mut order = Order::new(
+                    new.order_id,
+                    new.price,
+                    new.qty,
+                    new.side,
+                    new.order_type,
+                    new.time_in_force,
+                );
+                order.price_match = new.price_match;
+                self.orders.insert(update.order_id, order);
+            }
+
+            if let Some(order) = self.orders.get_mut(&update.order_id) {
+                for fill in update.fills {
+                    self.state.apply_fill(order.side, &fill);
+                    order.apply_fill(fill);
                 }
-                Entry::Vacant(entry) => {
-                    if order.req != Status::Rejected {
-                        let order_ = entry.insert(order);
-                        if USE_HANDLER {
-                            handler(order_);
-                        }
-                    }
+                if let Some(state) = &update.state {
+                    order.apply_state(state, update.exch_timestamp);
                 }
+                if USE_HANDLER {
+                    handler(order);
+                }
+            }
+            if let Some(result) = update.request_result {
+                self.last_request_results.insert(update.order_id, result);
+                self.pending_requests.remove(&update.order_id);
             }
         }
         Ok(wait_resp_order_received)
+    }
+
+    fn next_request_id(&mut self) -> u64 {
+        let request_id = self.next_request_id;
+        self.next_request_id = self
+            .next_request_id
+            .checked_add(1)
+            .expect("order request id should not overflow");
+        request_id
     }
 }
 
@@ -189,19 +202,25 @@ where
         current_timestamp: i64,
     ) -> Result<(), BacktestError> {
         validate_price_match(order_type, price_match)?;
-        if self.orders.contains_key(&order_id) {
+        if self.orders.contains_key(&order_id) || self.pending_requests.contains_key(&order_id) {
             return Err(BacktestError::OrderIdExist);
         }
 
-        let mut order = Order::new(order_id, price, qty, side, order_type, time_in_force);
-        order.price_match = price_match;
-        order.req = Status::New;
-        order.local_timestamp = current_timestamp;
-        self.orders.insert(order.order_id, order.clone());
-
-        self.order_l2e.request(order, |order| {
-            order.req = Status::Rejected;
-        });
+        let request = OrderRequest::New {
+            request_id: self.next_request_id(),
+            local_timestamp: current_timestamp,
+            order: NewOrder {
+                order_id,
+                price,
+                price_match,
+                qty,
+                side,
+                time_in_force,
+                order_type,
+            },
+        };
+        self.pending_requests.insert(order_id, request.clone());
+        self.order_l2e.request(request);
 
         Ok(())
     }
@@ -216,33 +235,27 @@ where
     ) -> Result<(), BacktestError> {
         let order = self
             .orders
-            .get_mut(&order_id)
+            .get(&order_id)
             .ok_or(BacktestError::OrderNotFound)?;
 
-        if order.req != Status::None {
+        if self.pending_requests.contains_key(&order_id) {
             return Err(BacktestError::OrderRequestInProcess);
         }
         validate_price_match(order.order_type, price_match)?;
-
-        let orig_price = order.price;
-        let orig_price_match = order.price_match;
-        let orig_qty = order.qty;
-
-        if price_match == PriceMatch::None {
-            order.price = price;
+        if !order.active() {
+            return Err(BacktestError::InvalidOrderStatus);
         }
-        order.price_match = price_match;
-        order.qty = qty;
 
-        order.req = Status::Replaced;
-        order.local_timestamp = current_timestamp;
-
-        self.order_l2e.request(order.clone(), |order| {
-            order.req = Status::Rejected;
-            order.price = orig_price;
-            order.price_match = orig_price_match;
-            order.qty = orig_qty;
-        });
+        let request = OrderRequest::Modify {
+            request_id: self.next_request_id(),
+            local_timestamp: current_timestamp,
+            order_id,
+            price,
+            price_match,
+            qty,
+        };
+        self.pending_requests.insert(order_id, request.clone());
+        self.order_l2e.request(request);
 
         Ok(())
     }
@@ -250,28 +263,30 @@ where
     fn cancel(&mut self, order_id: OrderId, current_timestamp: i64) -> Result<(), BacktestError> {
         let order = self
             .orders
-            .get_mut(&order_id)
+            .get(&order_id)
             .ok_or(BacktestError::OrderNotFound)?;
 
-        if order.req != Status::None {
+        if self.pending_requests.contains_key(&order_id) {
             return Err(BacktestError::OrderRequestInProcess);
         }
+        if !order.active() {
+            return Err(BacktestError::InvalidOrderStatus);
+        }
 
-        order.req = Status::Canceled;
-        order.local_timestamp = current_timestamp;
-
-        self.order_l2e.request(order.clone(), |order| {
-            order.req = Status::Rejected;
-        });
+        let request = OrderRequest::Cancel {
+            request_id: self.next_request_id(),
+            local_timestamp: current_timestamp,
+            order_id,
+        };
+        self.pending_requests.insert(order_id, request.clone());
+        self.order_l2e.request(request);
 
         Ok(())
     }
 
     fn clear_inactive_orders(&mut self) {
-        self.orders.retain(|_, order| {
-            order.status != Status::Expired
-                && order.status != Status::Filled
-                && order.status != Status::Canceled
+        self.orders.retain(|order_id, order| {
+            order.active() || self.pending_requests.contains_key(order_id)
         })
     }
 
@@ -289,6 +304,14 @@ where
 
     fn orders(&self) -> &HashMap<u64, Order> {
         &self.orders
+    }
+
+    fn pending_order_request(&self, order_id: OrderId) -> Option<&OrderRequest> {
+        self.pending_requests.get(&order_id)
+    }
+
+    fn last_order_request_result(&self, order_id: OrderId) -> Option<RequestResult> {
+        self.last_request_results.get(&order_id).copied()
     }
 
     fn last_trades(&self) -> &[Event] {
@@ -371,5 +394,260 @@ where
         self.order_l2e
             .earliest_send_order_timestamp()
             .unwrap_or(i64::MAX)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        backtest::{
+            assettype::LinearAsset,
+            models::{CommonFees, ConstantLatency, RiskAdverseQueueModel, TradingValueFeeModel},
+            order_bus::order_bus,
+            proc::PartialFillExchange,
+            rules::{TickSizeChange, TickSizeSchedule},
+        },
+        depth::BTreeMarketDepth,
+        types::{EXCH_ASK_DEPTH_EVENT, EXCH_SELL_TRADE_EVENT, OrderStatus, RequestOutcome},
+    };
+
+    #[test]
+    fn preserves_each_fill_in_a_multilevel_order_update() {
+        let (order_e2l, order_l2e) = order_bus(ConstantLatency::new(0, 0));
+        let state = || {
+            State::new(
+                LinearAsset::new(1.0),
+                TradingValueFeeModel::new(CommonFees::new(0.0, 0.0)),
+            )
+        };
+        let mut local = Local::new(BTreeMarketDepth::new(), state(), 0, order_l2e);
+        let schedule = TickSizeSchedule::new(vec![TickSizeChange {
+            effective_from: 0,
+            tick_size: Decimal::ONE,
+        }])
+        .expect("test tick size schedule should be valid");
+        let mut exchange = PartialFillExchange::new(
+            BTreeMarketDepth::new(),
+            state(),
+            RiskAdverseQueueModel::new(),
+            order_e2l,
+            schedule,
+        );
+        for (price, qty) in [(100, 2), (101, 1)] {
+            exchange
+                .process(&Event {
+                    ev: EXCH_ASK_DEPTH_EVENT,
+                    exch_ts: 0,
+                    local_ts: 0,
+                    px: Decimal::from(price),
+                    qty: Decimal::from(qty),
+                })
+                .expect("depth event should be processed");
+        }
+
+        local
+            .submit_order(
+                1,
+                Side::Buy,
+                Decimal::from(101),
+                PriceMatch::None,
+                Decimal::from(3),
+                OrdType::Limit,
+                TimeInForce::IOC,
+                0,
+            )
+            .expect("order should be submitted");
+        exchange
+            .process_recv_order(0, None)
+            .expect("exchange should process the request");
+        local
+            .process_recv_order(0, Some(1))
+            .expect("local should process the update");
+
+        let order = &local.orders()[&1];
+        assert_eq!(order.status, OrderStatus::Filled);
+        assert_eq!(order.filled, Decimal::from(3));
+        assert_eq!(
+            order
+                .fills
+                .iter()
+                .map(|fill| (fill.price, fill.qty, fill.is_maker))
+                .collect::<Vec<_>>(),
+            vec![
+                (Decimal::from(100), Decimal::from(2), false),
+                (Decimal::from(101), Decimal::ONE, false),
+            ]
+        );
+        assert!(local.pending_order_request(1).is_none());
+        assert_eq!(
+            local
+                .last_order_request_result(1)
+                .expect("request result should be retained")
+                .outcome,
+            RequestOutcome::Accepted
+        );
+        assert_eq!(local.state_values().num_trades, 2);
+    }
+
+    #[test]
+    fn one_order_retains_maker_and_taker_fills_across_modify() {
+        let (order_e2l, order_l2e) = order_bus(ConstantLatency::new(0, 0));
+        let state = || {
+            State::new(
+                LinearAsset::new(1.0),
+                TradingValueFeeModel::new(CommonFees::new(0.0, 0.0)),
+            )
+        };
+        let mut local = Local::new(BTreeMarketDepth::new(), state(), 0, order_l2e);
+        let schedule = TickSizeSchedule::new(vec![TickSizeChange {
+            effective_from: 0,
+            tick_size: Decimal::ONE,
+        }])
+        .expect("test tick size schedule should be valid");
+        let mut exchange = PartialFillExchange::new(
+            BTreeMarketDepth::new(),
+            state(),
+            RiskAdverseQueueModel::new(),
+            order_e2l,
+            schedule,
+        );
+        exchange
+            .process(&Event {
+                ev: EXCH_ASK_DEPTH_EVENT,
+                exch_ts: 0,
+                local_ts: 0,
+                px: Decimal::from(101),
+                qty: Decimal::TWO,
+            })
+            .expect("ask should be processed");
+        local
+            .submit_order(
+                7,
+                Side::Buy,
+                Decimal::from(100),
+                PriceMatch::None,
+                Decimal::from(3),
+                OrdType::Limit,
+                TimeInForce::GTC,
+                0,
+            )
+            .expect("maker order should be submitted");
+        exchange
+            .process_recv_order(0, None)
+            .expect("exchange should accept maker order");
+        local
+            .process_recv_order(0, Some(7))
+            .expect("local should receive maker acknowledgement");
+
+        exchange
+            .process(&Event {
+                ev: EXCH_SELL_TRADE_EVENT,
+                exch_ts: 1,
+                local_ts: 1,
+                px: Decimal::from(100),
+                qty: Decimal::ONE,
+            })
+            .expect("trade should partially fill maker order");
+        local
+            .process_recv_order(1, None)
+            .expect("local should receive maker fill");
+        assert_eq!(local.orders()[&7].filled, Decimal::ONE);
+
+        local
+            .modify(7, Decimal::from(101), PriceMatch::None, Decimal::from(3), 1)
+            .expect("modify should be submitted");
+        exchange
+            .process_recv_order(1, None)
+            .expect("exchange should process modify");
+        local
+            .process_recv_order(1, Some(7))
+            .expect("local should receive modify result");
+
+        let order = &local.orders()[&7];
+        assert_eq!(order.status, OrderStatus::Filled);
+        assert_eq!(order.filled, Decimal::from(3));
+        assert_eq!(
+            order
+                .fills
+                .iter()
+                .map(|fill| (fill.price, fill.qty, fill.is_maker))
+                .collect::<Vec<_>>(),
+            vec![
+                (Decimal::from(100), Decimal::ONE, true),
+                (Decimal::from(101), Decimal::TWO, false),
+            ]
+        );
+        assert_eq!(local.state_values().num_trades, 2);
+    }
+
+    #[test]
+    fn cancel_preserves_partial_fills_and_ends_the_open_state() {
+        let (order_e2l, order_l2e) = order_bus(ConstantLatency::new(0, 0));
+        let state = || {
+            State::new(
+                LinearAsset::new(1.0),
+                TradingValueFeeModel::new(CommonFees::new(0.0, 0.0)),
+            )
+        };
+        let mut local = Local::new(BTreeMarketDepth::new(), state(), 0, order_l2e);
+        let schedule = TickSizeSchedule::new(vec![TickSizeChange {
+            effective_from: 0,
+            tick_size: Decimal::ONE,
+        }])
+        .expect("test tick size schedule should be valid");
+        let mut exchange = PartialFillExchange::new(
+            BTreeMarketDepth::new(),
+            state(),
+            RiskAdverseQueueModel::new(),
+            order_e2l,
+            schedule,
+        );
+        local
+            .submit_order(
+                9,
+                Side::Buy,
+                Decimal::from(100),
+                PriceMatch::None,
+                Decimal::from(3),
+                OrdType::Limit,
+                TimeInForce::GTC,
+                0,
+            )
+            .expect("maker order should be submitted");
+        exchange
+            .process_recv_order(0, None)
+            .expect("exchange should accept maker order");
+        local
+            .process_recv_order(0, Some(9))
+            .expect("local should receive maker acknowledgement");
+        exchange
+            .process(&Event {
+                ev: EXCH_SELL_TRADE_EVENT,
+                exch_ts: 1,
+                local_ts: 1,
+                px: Decimal::from(100),
+                qty: Decimal::ONE,
+            })
+            .expect("trade should partially fill maker order");
+        local
+            .process_recv_order(1, None)
+            .expect("local should receive partial fill");
+
+        local.cancel(9, 1).expect("cancel should be submitted");
+        exchange
+            .process_recv_order(1, None)
+            .expect("exchange should process cancel");
+        local
+            .process_recv_order(1, Some(9))
+            .expect("local should receive cancel result");
+
+        let order = &local.orders()[&9];
+        assert_eq!(order.status, OrderStatus::Canceled);
+        assert_eq!(order.filled, Decimal::ONE);
+        assert_eq!(order.remaining(), Decimal::TWO);
+        assert_eq!(order.fills.len(), 1);
+        assert!(order.fills[0].is_maker);
+        assert!(!order.active());
     }
 }
