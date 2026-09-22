@@ -33,6 +33,3 @@ pub mod types;
 
 /// Provides common types.
 pub mod prelude;
-
-/// Provides utilities.
-mod utils;

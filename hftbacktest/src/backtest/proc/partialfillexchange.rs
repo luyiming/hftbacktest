@@ -696,26 +696,26 @@ mod tests {
         backtest::{
             assettype::LinearAsset,
             models::{CommonFees, ConstantLatency, RiskAdverseQueueModel, TradingValueFeeModel},
-            order::order_bus,
+            order::{LocalToExch, order_bus},
             rules::{TickSizeChange, TickSizeSchedule},
         },
         depth::BTreeMarketDepth,
     };
 
-    fn exchange() -> PartialFillExchange<
+    type TestExchange = PartialFillExchange<
         LinearAsset,
         ConstantLatency,
         RiskAdverseQueueModel<BTreeMarketDepth>,
         BTreeMarketDepth,
         TradingValueFeeModel<CommonFees>,
-    > {
-        let (order_e2l, _) = order_bus(ConstantLatency::new(0, 0));
-        let schedule = TickSizeSchedule::new(vec![TickSizeChange {
-            effective_from: 0,
-            tick_size: Decimal::ONE,
-        }])
-        .unwrap();
-        PartialFillExchange::new(
+    >;
+
+    fn exchange_with(
+        schedule: TickSizeSchedule,
+        latency: ConstantLatency,
+    ) -> (TestExchange, LocalToExch<ConstantLatency>) {
+        let (order_e2l, order_l2e) = order_bus(latency);
+        let exchange = PartialFillExchange::new(
             BTreeMarketDepth::new(),
             State::new(
                 LinearAsset::new(1.0),
@@ -724,7 +724,31 @@ mod tests {
             RiskAdverseQueueModel::new(),
             order_e2l,
             schedule,
-        )
+        );
+        (exchange, order_l2e)
+    }
+
+    fn exchange() -> TestExchange {
+        let schedule = TickSizeSchedule::new(vec![TickSizeChange {
+            effective_from: 0,
+            tick_size: Decimal::ONE,
+        }])
+        .expect("test tick size schedule should be valid");
+        exchange_with(schedule, ConstantLatency::new(0, 0)).0
+    }
+
+    fn switching_schedule() -> TickSizeSchedule {
+        TickSizeSchedule::new(vec![
+            TickSizeChange {
+                effective_from: 0,
+                tick_size: Decimal::new(1, 2),
+            },
+            TickSizeChange {
+                effective_from: 10,
+                tick_size: Decimal::new(1, 1),
+            },
+        ])
+        .expect("test tick size schedule should be valid")
     }
 
     #[test]
@@ -882,5 +906,147 @@ mod tests {
         assert_eq!(sufficient.cum_exec_qty, Decimal::from(3));
         assert_eq!(exchange.state.values().position, Decimal::from(3));
         assert_eq!(exchange.state.values().num_trades, 2);
+    }
+
+    #[test]
+    fn multilevel_fok_ioc_and_gtc_match_both_sides() {
+        for side in [Side::Buy, Side::Sell] {
+            for (time_in_force, qty, status, filled, trades, levels, buy_value, sell_value) in [
+                (TimeInForce::FOK, 5, Status::Expired, 0, 0, 0, 0.0, 0.0),
+                (TimeInForce::FOK, 4, Status::Filled, 4, 2, 2, 402.0, 394.0),
+                (TimeInForce::IOC, 5, Status::Expired, 4, 2, 2, 402.0, 394.0),
+                (TimeInForce::GTC, 5, Status::Filled, 5, 3, 3, 503.0, 492.0),
+            ] {
+                let mut exchange = exchange();
+                for (price, level_qty) in [(100, 2), (101, 2)] {
+                    exchange.depth.update_ask_depth(
+                        Decimal::from(price),
+                        Decimal::from(level_qty),
+                        0,
+                    );
+                }
+                for (price, level_qty) in [(99, 2), (98, 2)] {
+                    exchange.depth.update_bid_depth(
+                        Decimal::from(price),
+                        Decimal::from(level_qty),
+                        0,
+                    );
+                }
+                let limit = if side == Side::Buy { 101 } else { 98 };
+                let mut order = Order::new(
+                    1,
+                    Decimal::from(limit),
+                    Decimal::from(qty),
+                    side,
+                    OrdType::Limit,
+                    time_in_force,
+                );
+                exchange
+                    .ack_new(&mut order, 1)
+                    .expect("multilevel order should be processed");
+
+                let expected_value = if side == Side::Buy {
+                    buy_value
+                } else {
+                    sell_value
+                };
+                assert_eq!(order.status, status, "{side:?} {time_in_force:?}");
+                assert_eq!(order.cum_exec_qty, Decimal::from(filled));
+                assert_eq!(order.leaves_qty, Decimal::from(qty - filled));
+                assert_eq!(order.cum_exec_value, expected_value);
+                assert_eq!(order.taker_price_level_count, levels);
+                assert_eq!(exchange.state.values().num_trades, trades);
+                assert_eq!(
+                    exchange.state.values().position,
+                    Decimal::from(if side == Side::Buy { filled } else { -filled })
+                );
+                assert!(exchange.orders.borrow().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn both_sides_match_old_book_levels_after_tick_size_switch() {
+        let (mut exchange, _) = exchange_with(switching_schedule(), ConstantLatency::new(0, 0));
+        for (price, qty) in [(10005, 1), (10010, 2)] {
+            exchange
+                .depth
+                .update_ask_depth(Decimal::new(price, 2), Decimal::from(qty), 9);
+        }
+        for (price, qty) in [(9995, 1), (9990, 2)] {
+            exchange
+                .depth
+                .update_bid_depth(Decimal::new(price, 2), Decimal::from(qty), 9);
+        }
+
+        let mut buy = Order::new(
+            1,
+            Decimal::new(10010, 2),
+            Decimal::from(3),
+            Side::Buy,
+            OrdType::Limit,
+            TimeInForce::FOK,
+        );
+        exchange.ack_new(&mut buy, 10).expect("buy should match");
+        assert_eq!(buy.status, Status::Filled);
+        assert_eq!(buy.cum_exec_qty, Decimal::from(3));
+        assert_eq!(buy.cum_exec_value, 300.25);
+        assert_eq!(buy.taker_price_level_count, 2);
+
+        let mut sell = Order::new(
+            2,
+            Decimal::new(9990, 2),
+            Decimal::from(3),
+            Side::Sell,
+            OrdType::Limit,
+            TimeInForce::IOC,
+        );
+        exchange.ack_new(&mut sell, 10).expect("sell should match");
+        assert_eq!(sell.status, Status::Filled);
+        assert_eq!(sell.cum_exec_qty, Decimal::from(3));
+        assert_eq!(sell.cum_exec_value, 299.75);
+        assert_eq!(sell.taker_price_level_count, 2);
+        assert_eq!(exchange.state.values().position, Decimal::ZERO);
+        assert_eq!(exchange.state.values().num_trades, 4);
+    }
+
+    #[test]
+    fn delayed_orders_use_rule_at_exchange_arrival() {
+        for (local_timestamp, price, expected_status) in [
+            (8, Decimal::new(10005, 2), Status::New),
+            (9, Decimal::new(10005, 2), Status::Expired),
+            (10, Decimal::new(10005, 2), Status::Expired),
+            (9, Decimal::new(10010, 2), Status::New),
+        ] {
+            let (mut exchange, mut local) =
+                exchange_with(switching_schedule(), ConstantLatency::new(1, 2));
+            let mut order = Order::new(
+                1,
+                price,
+                Decimal::ONE,
+                Side::Buy,
+                OrdType::Limit,
+                TimeInForce::GTC,
+            );
+            order.local_timestamp = local_timestamp;
+            order.req = Status::New;
+            local.request(order, |_| panic!("positive latency should reach exchange"));
+            let arrival = local_timestamp + 1;
+            assert_eq!(exchange.earliest_recv_order_timestamp(), arrival);
+            exchange
+                .process_recv_order(arrival, None)
+                .expect("delayed order should be processed");
+            assert_eq!(local.earliest_recv_order_timestamp(), Some(arrival + 2));
+            let response = local
+                .receive(arrival + 2)
+                .expect("exchange response should arrive after response latency");
+            assert_eq!(response.status, expected_status);
+            assert_eq!(response.exch_timestamp, arrival);
+            assert_eq!(response.local_timestamp, local_timestamp);
+            assert_eq!(
+                exchange.orders.borrow().len(),
+                usize::from(expected_status == Status::New)
+            );
+        }
     }
 }
