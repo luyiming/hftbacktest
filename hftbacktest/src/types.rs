@@ -177,11 +177,6 @@ impl Side {
         }
     }
 
-    /// Returns the signed multiplier for this side as an `f64`.
-    pub const fn as_f64(self) -> f64 {
-        self.sign() as f64
-    }
-
     /// Returns the uppercase name of this side.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -553,13 +548,13 @@ impl Debug for Order {
 #[derive(PartialEq, Clone, Debug, Default)]
 pub struct StateValues {
     pub position: Decimal,
-    pub balance: f64,
-    pub fee: f64,
+    pub balance: Decimal,
+    pub fee: Decimal,
     // todo: currently, they are cumulative values, but they need to be values within the record
     //       interval.
     pub num_trades: i64,
-    pub trading_volume: f64,
-    pub trading_value: f64,
+    pub trading_volume: Decimal,
+    pub trading_value: Decimal,
 }
 
 /// Provides errors that can occur in builders.

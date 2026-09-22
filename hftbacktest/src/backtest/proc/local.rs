@@ -402,8 +402,8 @@ mod tests {
         let (order_e2l, order_l2e) = order_bus(ConstantLatency::new(0, 0));
         let state = || {
             State::new(
-                LinearAsset::new(1.0),
-                TradingValueFeeModel::new(CommonFees::new(0.0, 0.0)),
+                LinearAsset::new(Decimal::ONE),
+                TradingValueFeeModel::new(CommonFees::new(Decimal::ZERO, Decimal::ZERO)),
             )
         };
         let mut local = Local::new(BTreeMarketDepth::new(), state(), 0, order_l2e);
@@ -480,8 +480,8 @@ mod tests {
         let (order_e2l, order_l2e) = order_bus(ConstantLatency::new(0, 0));
         let state = || {
             State::new(
-                LinearAsset::new(1.0),
-                TradingValueFeeModel::new(CommonFees::new(0.0, 0.0)),
+                LinearAsset::new(Decimal::ONE),
+                TradingValueFeeModel::new(CommonFees::new(Decimal::ZERO, Decimal::ZERO)),
             )
         };
         let mut local = Local::new(BTreeMarketDepth::new(), state(), 0, order_l2e);
@@ -571,8 +571,8 @@ mod tests {
         let (order_e2l, order_l2e) = order_bus(ConstantLatency::new(0, 0));
         let state = || {
             State::new(
-                LinearAsset::new(1.0),
-                TradingValueFeeModel::new(CommonFees::new(0.0, 0.0)),
+                LinearAsset::new(Decimal::ONE),
+                TradingValueFeeModel::new(CommonFees::new(Decimal::ZERO, Decimal::ZERO)),
             )
         };
         let mut local = Local::new(BTreeMarketDepth::new(), state(), 0, order_l2e);

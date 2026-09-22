@@ -65,14 +65,23 @@ impl Recorder for BacktestRecorder {
             values.push(Record {
                 timestamp,
                 price: mid_price,
-                balance: state_values.balance,
+                balance: state_values
+                    .balance
+                    .to_f64()
+                    .expect("balance should fit f64"),
                 position: state_values
                     .position
                     .to_f64()
                     .expect("position should fit f64"),
-                fee: state_values.fee,
-                trading_volume: state_values.trading_volume,
-                trading_value: state_values.trading_value,
+                fee: state_values.fee.to_f64().expect("fee should fit f64"),
+                trading_volume: state_values
+                    .trading_volume
+                    .to_f64()
+                    .expect("trading volume should fit f64"),
+                trading_value: state_values
+                    .trading_value
+                    .to_f64()
+                    .expect("trading value should fit f64"),
                 num_trades: state_values.num_trades,
             });
         }

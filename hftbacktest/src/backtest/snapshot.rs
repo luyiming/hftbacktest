@@ -152,8 +152,11 @@ mod tests {
         >::new()
         .data(Vec::new())
         .latency_model(ConstantLatency::new(0, 0))
-        .asset_type(LinearAsset::new(1.0))
-        .fee_model(TradingValueFeeModel::new(CommonFees::new(0.0, 0.0)))
+        .asset_type(LinearAsset::new(Decimal::ONE))
+        .fee_model(TradingValueFeeModel::new(CommonFees::new(
+            Decimal::ZERO,
+            Decimal::ZERO,
+        )))
         .queue_model(RiskAdverseQueueModel::new())
         .depth(BTreeMarketDepth::new)
         .tick_size_schedule(schedule)

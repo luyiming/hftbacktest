@@ -763,8 +763,8 @@ mod tests {
         NoPartialFillExchange::new(
             depth,
             State::new(
-                LinearAsset::new(1.0),
-                TradingValueFeeModel::new(CommonFees::new(0.0, 0.0)),
+                LinearAsset::new(Decimal::ONE),
+                TradingValueFeeModel::new(CommonFees::new(Decimal::ZERO, Decimal::ZERO)),
             ),
             RiskAdverseQueueModel::new(),
             order_e2l,

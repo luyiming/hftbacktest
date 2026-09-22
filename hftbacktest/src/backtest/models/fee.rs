@@ -1,18 +1,19 @@
-use crate::prelude::Side;
+use crate::prelude::{OrderFill, Side};
+use rust_decimal::Decimal;
 
 /// Common transaction fees
 /// Fee calculation is determined by the fee model.
 #[derive(Clone)]
 pub struct CommonFees {
     /// Fee for adding liquidity (maker order).
-    maker_fee: f64,
+    maker_fee: Decimal,
     /// Fee for removing liquidity (taker order).
-    taker_fee: f64,
+    taker_fee: Decimal,
 }
 
 impl CommonFees {
     /// Constructs `CommonFees`.
-    pub fn new(maker_fee: f64, taker_fee: f64) -> Self {
+    pub fn new(maker_fee: Decimal, taker_fee: Decimal) -> Self {
         Self {
             maker_fee,
             taker_fee,
@@ -27,14 +28,14 @@ pub struct DirectionalFees {
     /// The common transaction fees
     common_fees: CommonFees,
     /// Buyer fee based on the transaction value
-    buyer_fee: f64,
+    buyer_fee: Decimal,
     /// Seller fee based on the transaction value
-    seller_fee: f64,
+    seller_fee: Decimal,
 }
 
 impl DirectionalFees {
     /// Constructs `DirectionalFees`.
-    pub fn new(common_fees: CommonFees, buyer_fee: f64, seller_fee: f64) -> Self {
+    pub fn new(common_fees: CommonFees, buyer_fee: Decimal, seller_fee: Decimal) -> Self {
         Self {
             common_fees,
             buyer_fee,
@@ -45,17 +46,9 @@ impl DirectionalFees {
 
 /// Provides the fee.
 pub trait FeeModel {
-    /// Calculates the fee amount for an applied fill.
-    fn amount(&self, fill: &Fill) -> f64;
-}
-
-/// Applied fill data used for fee calculation.
-pub struct Fill {
-    pub qty: f64,
-    pub price: f64,
-    pub value: f64,
-    pub maker: bool,
-    pub side: Side,
+    /// Calculates the fee for an applied fill using its order side and asset-denominated trading
+    /// value.
+    fn amount(&self, fill: &OrderFill, side: Side, trading_value: Decimal) -> Decimal;
 }
 
 /// Fee based on the transaction value,
@@ -73,29 +66,29 @@ impl<Fees> TradingValueFeeModel<Fees> {
 }
 
 impl FeeModel for TradingValueFeeModel<CommonFees> {
-    fn amount(&self, fill: &Fill) -> f64 {
-        if fill.maker {
-            self.fees.maker_fee * fill.value
+    fn amount(&self, fill: &OrderFill, _side: Side, trading_value: Decimal) -> Decimal {
+        if fill.is_maker {
+            self.fees.maker_fee * trading_value
         } else {
-            self.fees.taker_fee * fill.value
+            self.fees.taker_fee * trading_value
         }
     }
 }
 
 impl FeeModel for TradingValueFeeModel<DirectionalFees> {
-    fn amount(&self, fill: &Fill) -> f64 {
-        match (fill.maker, fill.side) {
+    fn amount(&self, fill: &OrderFill, side: Side, trading_value: Decimal) -> Decimal {
+        match (fill.is_maker, side) {
             (true, Side::Buy) => {
-                (self.fees.common_fees.maker_fee + self.fees.buyer_fee) * fill.value
+                (self.fees.common_fees.maker_fee + self.fees.buyer_fee) * trading_value
             }
             (false, Side::Buy) => {
-                (self.fees.common_fees.taker_fee + self.fees.buyer_fee) * fill.value
+                (self.fees.common_fees.taker_fee + self.fees.buyer_fee) * trading_value
             }
             (true, Side::Sell) => {
-                (self.fees.common_fees.maker_fee + self.fees.seller_fee) * fill.value
+                (self.fees.common_fees.maker_fee + self.fees.seller_fee) * trading_value
             }
             (false, Side::Sell) => {
-                (self.fees.common_fees.taker_fee + self.fees.seller_fee) * fill.value
+                (self.fees.common_fees.taker_fee + self.fees.seller_fee) * trading_value
             }
         }
     }
@@ -115,8 +108,8 @@ impl<Fees> TradingQtyFeeModel<Fees> {
     }
 }
 impl FeeModel for TradingQtyFeeModel<CommonFees> {
-    fn amount(&self, fill: &Fill) -> f64 {
-        if fill.maker {
+    fn amount(&self, fill: &OrderFill, _side: Side, _trading_value: Decimal) -> Decimal {
+        if fill.is_maker {
             self.fees.maker_fee * fill.qty
         } else {
             self.fees.taker_fee * fill.qty
@@ -125,19 +118,19 @@ impl FeeModel for TradingQtyFeeModel<CommonFees> {
 }
 
 impl FeeModel for TradingQtyFeeModel<DirectionalFees> {
-    fn amount(&self, fill: &Fill) -> f64 {
-        match (fill.maker, fill.side) {
+    fn amount(&self, fill: &OrderFill, side: Side, trading_value: Decimal) -> Decimal {
+        match (fill.is_maker, side) {
             (true, Side::Buy) => {
-                self.fees.common_fees.maker_fee * fill.qty + self.fees.buyer_fee * fill.value
+                self.fees.common_fees.maker_fee * fill.qty + self.fees.buyer_fee * trading_value
             }
             (false, Side::Buy) => {
-                self.fees.common_fees.taker_fee * fill.qty + self.fees.buyer_fee * fill.value
+                self.fees.common_fees.taker_fee * fill.qty + self.fees.buyer_fee * trading_value
             }
             (true, Side::Sell) => {
-                self.fees.common_fees.maker_fee * fill.qty + self.fees.seller_fee * fill.value
+                self.fees.common_fees.maker_fee * fill.qty + self.fees.seller_fee * trading_value
             }
             (false, Side::Sell) => {
-                self.fees.common_fees.taker_fee * fill.qty + self.fees.seller_fee * fill.value
+                self.fees.common_fees.taker_fee * fill.qty + self.fees.seller_fee * trading_value
             }
         }
     }
@@ -156,8 +149,8 @@ impl<Fees> FlatPerTradeFeeModel<Fees> {
 }
 
 impl FeeModel for FlatPerTradeFeeModel<CommonFees> {
-    fn amount(&self, fill: &Fill) -> f64 {
-        if fill.maker {
+    fn amount(&self, fill: &OrderFill, _side: Side, _trading_value: Decimal) -> Decimal {
+        if fill.is_maker {
             self.fees.maker_fee
         } else {
             self.fees.taker_fee

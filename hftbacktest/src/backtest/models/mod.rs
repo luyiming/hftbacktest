@@ -8,7 +8,7 @@ mod latency;
 mod queue;
 
 pub use fee::{
-    CommonFees, DirectionalFees, FeeModel, Fill, FlatPerTradeFeeModel, TradingQtyFeeModel,
+    CommonFees, DirectionalFees, FeeModel, FlatPerTradeFeeModel, TradingQtyFeeModel,
     TradingValueFeeModel,
 };
 pub use latency::{ConstantLatency, IntpOrderLatency, LatencyModel, OrderLatencyRow};
