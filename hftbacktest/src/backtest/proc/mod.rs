@@ -13,12 +13,14 @@ pub use partialfillexchange::PartialFillExchange;
 use crate::{
     backtest::{
         BacktestError,
+        proc::price_match::{price_satisfies_rule, resolve_price_match},
+        rules::TickSizeSchedule,
         snapshot::{SnapshotContext, SnapshotError},
     },
     depth::MarketDepth,
     prelude::{
-        Event, OrdType, Order, OrderId, OrderRequest, PriceMatch, RequestResult, Side, StateValues,
-        TimeInForce,
+        Event, OrdType, Order, OrderFill, OrderId, OrderRequest, OrderStatus, PriceMatch,
+        RequestResult, Side, StateValues, TimeInForce,
     },
 };
 
@@ -26,6 +28,69 @@ use crate::{
 struct RestingOrder<S> {
     order: Order,
     queue_state: S,
+}
+
+#[derive(Clone, Copy)]
+struct OrderAmendment {
+    price: Decimal,
+    price_match: PriceMatch,
+    qty: Decimal,
+}
+
+enum ModifyPlan {
+    Reject,
+    Terminate(OrderStatus),
+    Reenter(Order),
+}
+
+enum ModifyAck {
+    Accepted { order: Order, fills: Vec<OrderFill> },
+    Rejected { current: Option<Order> },
+}
+
+fn plan_modify<MD>(
+    existing: &Order,
+    amendment: OrderAmendment,
+    timestamp: i64,
+    depth: &MD,
+    tick_sizes: &TickSizeSchedule,
+) -> Result<ModifyPlan, BacktestError>
+where
+    MD: MarketDepth,
+{
+    if amendment.qty <= Decimal::ZERO {
+        return Ok(ModifyPlan::Reject);
+    }
+
+    let mut candidate = existing.clone();
+    let price_instruction_changed =
+        candidate.price != amendment.price || candidate.price_match != amendment.price_match;
+    candidate.price = amendment.price;
+    candidate.price_match = amendment.price_match;
+    candidate.qty = amendment.qty;
+
+    if price_instruction_changed && !price_satisfies_rule(&candidate, timestamp, tick_sizes)? {
+        return Ok(ModifyPlan::Reject);
+    }
+    let Some(price) = resolve_price_match(&candidate, depth) else {
+        return Ok(ModifyPlan::Reject);
+    };
+    candidate.price = price;
+
+    if existing.filled > Decimal::ZERO && candidate.qty <= existing.filled {
+        return Ok(ModifyPlan::Terminate(OrderStatus::Canceled));
+    }
+    let crosses_book = candidate.order_type == OrdType::Limit
+        && candidate.time_in_force == TimeInForce::GTX
+        && match candidate.side {
+            Side::Buy => depth.best_ask().is_some_and(|ask| candidate.price >= ask),
+            Side::Sell => depth.best_bid().is_some_and(|bid| candidate.price <= bid),
+        };
+    if crosses_book {
+        return Ok(ModifyPlan::Terminate(OrderStatus::Expired));
+    }
+
+    Ok(ModifyPlan::Reenter(candidate))
 }
 
 /// Provides local-specific interaction.
@@ -194,4 +259,93 @@ pub trait Processor {
     /// Returns the foremost timestamp at which an order sent by this processor is to be received by
     /// the corresponding processor.
     fn earliest_send_order_timestamp(&self) -> i64;
+}
+
+#[cfg(test)]
+mod tests {
+    use rust_decimal::Decimal;
+
+    use super::{ModifyPlan, OrderAmendment, plan_modify};
+    use crate::{
+        backtest::rules::{TickSizeChange, TickSizeSchedule},
+        depth::{BTreeMarketDepth, L2MarketDepth},
+        types::{OrdType, Order, OrderStatus, PriceMatch, Side, TimeInForce},
+    };
+
+    fn tick_sizes() -> TickSizeSchedule {
+        TickSizeSchedule::new(vec![
+            TickSizeChange {
+                effective_from: 0,
+                tick_size: Decimal::new(1, 2),
+            },
+            TickSizeChange {
+                effective_from: 10,
+                tick_size: Decimal::ONE,
+            },
+        ])
+        .expect("test tick size schedule should be valid")
+    }
+
+    #[test]
+    fn switching_from_price_match_to_explicit_price_revalidates_tick_size() {
+        let mut existing = Order::new(
+            1,
+            Decimal::new(10005, 2),
+            Decimal::ONE,
+            Side::Buy,
+            OrdType::Limit,
+            TimeInForce::GTC,
+        );
+        existing.price_match = PriceMatch::Queue;
+
+        let plan = plan_modify(
+            &existing,
+            OrderAmendment {
+                price: existing.price,
+                price_match: PriceMatch::None,
+                qty: existing.qty,
+            },
+            10,
+            &BTreeMarketDepth::new(),
+            &tick_sizes(),
+        )
+        .expect("modify should be planned");
+
+        assert!(matches!(plan, ModifyPlan::Reject));
+    }
+
+    #[test]
+    fn crossing_gtx_modify_expires_on_both_sides() {
+        let mut depth = BTreeMarketDepth::new();
+        depth.update_bid_depth(Decimal::from(99), Decimal::ONE, 0);
+        depth.update_ask_depth(Decimal::from(101), Decimal::ONE, 0);
+
+        for (side, resting_price, crossing_price) in [
+            (Side::Buy, Decimal::from(100), Decimal::from(101)),
+            (Side::Sell, Decimal::from(102), Decimal::from(99)),
+        ] {
+            let existing = Order::new(
+                1,
+                resting_price,
+                Decimal::ONE,
+                side,
+                OrdType::Limit,
+                TimeInForce::GTX,
+            );
+            let plan = plan_modify(
+                &existing,
+                OrderAmendment {
+                    price: crossing_price,
+                    price_match: PriceMatch::None,
+                    qty: existing.qty,
+                },
+                0,
+                &depth,
+                &tick_sizes(),
+            )
+            .expect("modify should be planned");
+
+            assert!(matches!(plan, ModifyPlan::Terminate(OrderStatus::Expired)));
+        }
+    }
 }
