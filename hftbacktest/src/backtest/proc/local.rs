@@ -98,71 +98,6 @@ where
         self
     }
 
-    pub fn process_recv_order_<const USE_HANDLER: bool, Handler>(
-        &mut self,
-        timestamp: i64,
-        wait_resp_order_id: Option<OrderId>,
-        mut handler: Handler,
-    ) -> Result<bool, BacktestError>
-    where
-        Handler: FnMut(&Order),
-    {
-        let mut wait_resp_order_received = false;
-        while let Some(update) = self.order_l2e.receive(timestamp) {
-            if let Some(wait_resp_order_id) = wait_resp_order_id
-                && update.order_id == wait_resp_order_id
-                && update.request_result.is_some()
-            {
-                wait_resp_order_received = true;
-            }
-
-            let pending = update.request_result.and_then(|result| {
-                self.pending_requests
-                    .get(&update.order_id)
-                    .filter(|request| request.request_id() == result.request_id)
-                    .cloned()
-            });
-            if let Some(request) = &pending {
-                self.last_order_latency =
-                    Some((request.local_timestamp(), update.exch_timestamp, timestamp));
-            }
-
-            if update.state.is_some() && !self.orders.contains_key(&update.order_id) {
-                let Some(OrderRequest::New { order: new, .. }) = pending.as_ref() else {
-                    return Err(BacktestError::InvalidOrderRequest);
-                };
-                let mut order = Order::new(
-                    new.order_id,
-                    new.price,
-                    new.qty,
-                    new.side,
-                    new.order_type,
-                    new.time_in_force,
-                );
-                order.price_match = new.price_match;
-                self.orders.insert(update.order_id, order);
-            }
-
-            if let Some(order) = self.orders.get_mut(&update.order_id) {
-                for fill in update.fills {
-                    self.state.apply_fill(order.side, &fill);
-                    order.apply_fill(fill);
-                }
-                if let Some(state) = &update.state {
-                    order.apply_state(state, update.exch_timestamp);
-                }
-                if USE_HANDLER {
-                    handler(order);
-                }
-            }
-            if let Some(result) = update.request_result {
-                self.last_request_results.insert(update.order_id, result);
-                self.pending_requests.remove(&update.order_id);
-            }
-        }
-        Ok(wait_resp_order_received)
-    }
-
     fn next_request_id(&mut self) -> u64 {
         let request_id = self.next_request_id;
         self.next_request_id = self
@@ -381,7 +316,57 @@ where
         timestamp: i64,
         wait_resp_order_id: Option<OrderId>,
     ) -> Result<bool, BacktestError> {
-        self.process_recv_order_::<false, _>(timestamp, wait_resp_order_id, |_| {})
+        let mut wait_resp_order_received = false;
+        while let Some(update) = self.order_l2e.receive(timestamp) {
+            if let Some(wait_resp_order_id) = wait_resp_order_id
+                && update.order_id == wait_resp_order_id
+                && update.request_result.is_some()
+            {
+                wait_resp_order_received = true;
+            }
+
+            let pending = update.request_result.and_then(|result| {
+                self.pending_requests
+                    .get(&update.order_id)
+                    .filter(|request| request.request_id() == result.request_id)
+                    .cloned()
+            });
+            if let Some(request) = &pending {
+                self.last_order_latency =
+                    Some((request.local_timestamp(), update.exch_timestamp, timestamp));
+            }
+
+            if update.state.is_some() && !self.orders.contains_key(&update.order_id) {
+                let Some(OrderRequest::New { order: new, .. }) = pending.as_ref() else {
+                    return Err(BacktestError::InvalidOrderRequest);
+                };
+                let mut order = Order::new(
+                    new.order_id,
+                    new.price,
+                    new.qty,
+                    new.side,
+                    new.order_type,
+                    new.time_in_force,
+                );
+                order.price_match = new.price_match;
+                self.orders.insert(update.order_id, order);
+            }
+
+            if let Some(order) = self.orders.get_mut(&update.order_id) {
+                for fill in update.fills {
+                    self.state.apply_fill(order.side, &fill);
+                    order.apply_fill(fill);
+                }
+                if let Some(state) = &update.state {
+                    order.apply_state(state, update.exch_timestamp);
+                }
+            }
+            if let Some(result) = update.request_result {
+                self.last_request_results.insert(update.order_id, result);
+                self.pending_requests.remove(&update.order_id);
+            }
+        }
+        Ok(wait_resp_order_received)
     }
 
     fn earliest_recv_order_timestamp(&self) -> i64 {

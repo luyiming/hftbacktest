@@ -56,9 +56,8 @@ where
             maker: order_fill.is_maker,
             side,
         };
-        self.state_values.position +=
-            order_fill.qty * Decimal::from(*AsRef::<f64>::as_ref(&side) as i64);
-        self.state_values.balance -= amount * AsRef::<f64>::as_ref(&side);
+        self.state_values.position += order_fill.qty * Decimal::from(side.sign());
+        self.state_values.balance -= amount * side.as_f64();
         self.state_values.fee += self.fee_model.amount(&fill);
         self.state_values.num_trades += 1;
         self.state_values.trading_volume += exec_qty_f64;

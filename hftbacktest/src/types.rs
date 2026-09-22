@@ -161,65 +161,78 @@ impl Event {
 /// Represents a side, which can refer to either the side of an order or the initiator's side in a
 /// trade event, with the meaning varying depending on the context.
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
-#[repr(i8)]
 pub enum Side {
     /// In the market depth event, this indicates the bid side; in the market trade event, it
     /// indicates that the trade initiator is a buyer.
-    Buy = 1,
+    Buy,
     /// In the market depth event, this indicates the ask side; in the market trade event, it
     /// indicates that the trade initiator is a seller.
-    Sell = -1,
+    Sell,
 }
 
-impl AsRef<f64> for Side {
-    fn as_ref(&self) -> &f64 {
+impl Side {
+    /// Returns the signed multiplier for this side.
+    pub const fn sign(self) -> i8 {
         match self {
-            Side::Buy => &1.0f64,
-            Side::Sell => &-1.0f64,
+            Self::Buy => 1,
+            Self::Sell => -1,
         }
     }
-}
 
-impl AsRef<str> for Side {
-    fn as_ref(&self) -> &'static str {
+    /// Returns the signed multiplier for this side as an `f64`.
+    pub const fn as_f64(self) -> f64 {
+        self.sign() as f64
+    }
+
+    /// Returns the uppercase name of this side.
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Side::Buy => "BUY",
-            Side::Sell => "SELL",
+            Self::Buy => "BUY",
+            Self::Sell => "SELL",
         }
     }
 }
 
 /// Exchange-confirmed order status.
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
-#[repr(u8)]
 pub enum OrderStatus {
-    Open = 0,
-    Filled = 1,
-    Canceled = 2,
-    Expired = 3,
+    Open,
+    Filled,
+    Canceled,
+    Expired,
+}
+
+impl OrderStatus {
+    /// Returns whether this status represents the end of an order's lifecycle.
+    pub const fn is_terminal(self) -> bool {
+        match self {
+            Self::Open => false,
+            Self::Filled | Self::Canceled | Self::Expired => true,
+        }
+    }
 }
 
 /// Time In Force
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
-#[repr(u8)]
 pub enum TimeInForce {
     /// Good 'Til Canceled
-    GTC = 0,
+    GTC,
     /// Post-only
-    GTX = 1,
+    GTX,
     /// Fill or Kill
-    FOK = 2,
+    FOK,
     /// Immediate or Cancel
-    IOC = 3,
+    IOC,
 }
 
-impl AsRef<str> for TimeInForce {
-    fn as_ref(&self) -> &'static str {
+impl TimeInForce {
+    /// Returns the uppercase name of this time-in-force policy.
+    pub const fn as_str(self) -> &'static str {
         match self {
-            TimeInForce::GTC => "GTC",
-            TimeInForce::GTX => "GTX",
-            TimeInForce::FOK => "FOK",
-            TimeInForce::IOC => "IOC",
+            Self::GTC => "GTC",
+            Self::GTX => "GTX",
+            Self::FOK => "FOK",
+            Self::IOC => "IOC",
         }
     }
 }
@@ -229,48 +242,48 @@ impl AsRef<str> for TimeInForce {
 /// The exchange resolves the requested book level when it receives a new or modify request, so
 /// the resulting price reflects order entry latency.
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
-#[repr(u8)]
 pub enum PriceMatch {
-    None = 0,
-    Opponent = 1,
-    Opponent5 = 2,
-    Opponent10 = 3,
-    Opponent20 = 4,
-    Queue = 5,
-    Queue5 = 6,
-    Queue10 = 7,
-    Queue20 = 8,
+    None,
+    Opponent,
+    Opponent5,
+    Opponent10,
+    Opponent20,
+    Queue,
+    Queue5,
+    Queue10,
+    Queue20,
 }
 
-impl AsRef<str> for PriceMatch {
-    fn as_ref(&self) -> &'static str {
+impl PriceMatch {
+    /// Returns the uppercase name of this price matching mode.
+    pub const fn as_str(self) -> &'static str {
         match self {
-            PriceMatch::None => "NONE",
-            PriceMatch::Opponent => "OPPONENT",
-            PriceMatch::Opponent5 => "OPPONENT_5",
-            PriceMatch::Opponent10 => "OPPONENT_10",
-            PriceMatch::Opponent20 => "OPPONENT_20",
-            PriceMatch::Queue => "QUEUE",
-            PriceMatch::Queue5 => "QUEUE_5",
-            PriceMatch::Queue10 => "QUEUE_10",
-            PriceMatch::Queue20 => "QUEUE_20",
+            Self::None => "NONE",
+            Self::Opponent => "OPPONENT",
+            Self::Opponent5 => "OPPONENT_5",
+            Self::Opponent10 => "OPPONENT_10",
+            Self::Opponent20 => "OPPONENT_20",
+            Self::Queue => "QUEUE",
+            Self::Queue5 => "QUEUE_5",
+            Self::Queue10 => "QUEUE_10",
+            Self::Queue20 => "QUEUE_20",
         }
     }
 }
 
 /// Order type
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
-#[repr(u8)]
 pub enum OrdType {
-    Limit = 0,
-    Market = 1,
+    Limit,
+    Market,
 }
 
-impl AsRef<str> for OrdType {
-    fn as_ref(&self) -> &'static str {
+impl OrdType {
+    /// Returns the uppercase name of this order type.
+    pub const fn as_str(self) -> &'static str {
         match self {
-            OrdType::Limit => "LIMIT",
-            OrdType::Market => "MARKET",
+            Self::Limit => "LIMIT",
+            Self::Market => "MARKET",
         }
     }
 }
@@ -551,7 +564,7 @@ impl Order {
 
     /// Returns whether this order is active in the market.
     pub fn active(&self) -> bool {
-        self.status == OrderStatus::Open
+        !self.status.is_terminal()
     }
 }
 

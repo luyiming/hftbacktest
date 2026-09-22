@@ -193,10 +193,7 @@ where
         maker: bool,
         exec_price: Decimal,
     ) -> Result<(), BacktestError> {
-        if order.status == OrderStatus::Expired
-            || order.status == OrderStatus::Canceled
-            || order.status == OrderStatus::Filled
-        {
+        if order.status.is_terminal() {
             return Err(BacktestError::InvalidOrderStatus);
         }
 
