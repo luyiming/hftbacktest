@@ -17,7 +17,7 @@ use crate::{
         data::{adjust_feed_latency, format::read_market_data_file},
         evs::{EventIntentKind, EventSet},
         models::{LatencyModel, QueueModel},
-        order::order_bus,
+        order_bus::order_bus,
         proc::{Local, LocalProcessor, NoPartialFillExchange, PartialFillExchange, Processor},
         state::State,
     },
@@ -36,7 +36,7 @@ pub mod rules;
 pub mod models;
 
 /// OrderBus implementation
-pub mod order;
+pub mod order_bus;
 
 /// Local and exchange models
 pub mod proc;

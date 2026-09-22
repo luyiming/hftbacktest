@@ -9,6 +9,7 @@ use crate::{
 /// based on the given timestamp.
 #[derive(Clone, Debug, Default)]
 pub struct OrderBus {
+    // i64 timestamp represents the time when the order is **expected** to be received by the other side.
     order_list: Rc<RefCell<VecDeque<(Order, i64)>>>,
 }
 

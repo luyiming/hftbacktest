@@ -9,7 +9,7 @@ use crate::{
         Backtest, BacktestProcessorState,
         assettype::LinearAsset,
         models::{CommonFees, ConstantLatency, RiskAdverseQueueModel, TradingValueFeeModel},
-        order::OrderBus,
+        order_bus::OrderBus,
         proc::{LocalProcessor, Processor},
     },
     depth::{BTreeMarketDepth, MarketDepth},

@@ -30,7 +30,7 @@ fn convert_fuse(
             return Err(PyValueError::new_err(
                 "snapshot_mode must be process, ignore, or ignore_sod",
             ));
-        },
+        }
     };
     py.detach(move || {
         hftbacktest::backtest::data::convert::convert_fuse(ConvertRequest {

@@ -11,7 +11,7 @@ use crate::{
         BacktestError,
         assettype::AssetType,
         models::{FeeModel, LatencyModel, QueueModel},
-        order::ExchToLocal,
+        order_bus::ExchToLocal,
         proc::{
             Processor,
             price_match::{price_satisfies_rule, resolve_price_match},
@@ -697,7 +697,7 @@ mod tests {
         backtest::{
             assettype::LinearAsset,
             models::{CommonFees, ConstantLatency, RiskAdverseQueueModel, TradingValueFeeModel},
-            order::order_bus,
+            order_bus::order_bus,
             rules::{TickSizeChange, TickSizeSchedule},
         },
         depth::{BTreeMarketDepth, L2MarketDepth},
