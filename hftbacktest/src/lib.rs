@@ -1,5 +1,3 @@
-#![cfg_attr(docsrs, feature(doc_auto_cfg))]
-
 //! # HftBacktest
 //!
 //! This Rust framework is designed for developing and running high-frequency trading and
@@ -13,16 +11,8 @@
 //! - Backtest accounting for both feed and order latency, using provided models or your own custom model.
 //! - Order fill simulation that takes into account the order queue position, using provided models or your own custom model.
 //! - Backtesting of multi-asset and multi-exchange models
-//! ## Feature flags
-//!
-//! Currently, `default` enables the `backtest` feature.
-//!
-//! - `backtest`: Enables backtesting features.
-//! - `s3`: Enables accessing data file from S3.
-//!
 
 /// Provides backtesting features.
-#[cfg(any(feature = "backtest", doc))]
 pub mod backtest;
 
 /// Provides market depth implementations.
