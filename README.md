@@ -32,10 +32,20 @@ feed data.
 
     hftbacktest = { git = "https://github.com/nkaz001/hftbacktest.git" }
 
-### Data Format
+### Data Conversion
 
-The Rust implementation uses a different data format compared to the Python implementation. Please see the Rust version 
-part of [Data Preparation](https://hftbacktest.readthedocs.io/en/latest/tutorials/Data%20Preparation.html) tutorial.
+The `convert-fuse` command converts Tardis trades and L2 depth CSV files to the
+market-data NPZ format used by the Rust backtester:
+
+```bash
+cargo run --release -- convert-fuse \
+  --trades-filename trades.csv.gz \
+  --depth-filename depth.csv.gz \
+  --output-filename events.npz
+```
+
+Run `cargo run --release -- convert-fuse --help` for book ticker, snapshot, and
+latency options.
 
 ### Examples
 
