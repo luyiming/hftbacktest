@@ -14,11 +14,10 @@ use crate::{
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum SnapshotMode {
+pub enum SnapshotResetMode {
     #[default]
-    Process,
-    Ignore,
-    IgnoreSod,
+    Range,
+    Full,
 }
 
 pub struct ConvertRequest<'a> {
@@ -26,7 +25,7 @@ pub struct ConvertRequest<'a> {
     pub depth: &'a Path,
     pub book_ticker: Option<&'a Path>,
     pub output: &'a Path,
-    pub snapshot_mode: SnapshotMode,
+    pub snapshot_reset_mode: SnapshotResetMode,
     pub base_latency: i64,
     pub initial_snapshot: Option<&'a Path>,
     pub eod_output: Option<EodOutput<'a>>,
@@ -84,7 +83,7 @@ pub fn convert_fuse(request: ConvertRequest<'_>) -> Result<usize> {
         .map(|path| read_events(path, FeedKind::BookTicker))
         .transpose()?
         .unwrap_or_default();
-    let (fused, fuse) = fuse_events(&depth, &ticker, request.snapshot_mode, fuse);
+    let (fused, fuse) = fuse_events(&depth, &ticker, request.snapshot_reset_mode, fuse);
     output.extend(fused);
     let output = order_events(output, request.base_latency)?;
     if let Some(eod) = request.eod_output {
@@ -99,12 +98,11 @@ pub fn convert_fuse(request: ConvertRequest<'_>) -> Result<usize> {
 fn fuse_events(
     depth: &[StoredEvent],
     ticker: &[StoredEvent],
-    mode: SnapshotMode,
+    reset_mode: SnapshotResetMode,
     mut fuse: FixedFuse,
 ) -> (Vec<StoredEvent>, FixedFuse) {
     let mut output = Vec::new();
     let (mut d, mut t) = (0, 0);
-    let mut at_start = true;
     while d < depth.len() || t < ticker.len() {
         if t < ticker.len() && (d == depth.len() || ticker[t].local_ts < depth[d].local_ts) {
             output.extend(fuse.process(ticker[t].clone()));
@@ -114,42 +112,55 @@ fn fuse_events(
             while d < depth.len() && depth[d].ev & 0xff == DEPTH_SNAPSHOT_EVENT {
                 d += 1;
             }
-            let publish =
-                mode != SnapshotMode::Ignore && !(mode == SnapshotMode::IgnoreSod && at_start);
-            for side in [BUY_EVENT, SELL_EVENT] {
-                let rows: Vec<_> = depth[start..d]
-                    .iter()
-                    .filter(|row| row.ev & side != 0)
-                    .collect();
-                if let Some(first) = rows.first() {
-                    let limit = if side == BUY_EVENT {
-                        rows.iter().map(|row| row.px).min()
-                    } else {
-                        rows.iter().map(|row| row.px).max()
-                    }
-                    .expect("nonempty snapshot should have a price limit");
-                    let cleared = fuse.process(StoredEvent {
-                        ev: DEPTH_CLEAR_EVENT | side,
-                        px: limit,
-                        qty: 0,
-                        ..(*first).clone()
-                    });
-                    if publish {
-                        output.extend(cleared);
-                    }
-                    for row in rows {
-                        let updated = fuse.process(row.clone());
-                        if publish {
-                            output.extend(updated);
+            match reset_mode {
+                SnapshotResetMode::Range => {
+                    for side in [BUY_EVENT, SELL_EVENT] {
+                        let rows: Vec<_> = depth[start..d]
+                            .iter()
+                            .filter(|row| row.ev & side != 0)
+                            .collect();
+                        if let Some(first) = rows.first() {
+                            let limit = if side == BUY_EVENT {
+                                rows.iter().map(|row| row.px).min()
+                            } else {
+                                rows.iter().map(|row| row.px).max()
+                            }
+                            .expect("nonempty snapshot should have a price limit");
+                            output.extend(fuse.process(StoredEvent {
+                                ev: DEPTH_CLEAR_EVENT | side,
+                                px: limit,
+                                qty: 0,
+                                ..(*first).clone()
+                            }));
+                            for row in rows {
+                                output.extend(fuse.process(row.clone()));
+                            }
                         }
                     }
                 }
+                SnapshotResetMode::Full => {
+                    let first = &depth[start];
+                    output.extend(
+                        fuse.process(StoredEvent {
+                            ev: DEPTH_CLEAR_EVENT,
+                            exch_ts: depth[start..d]
+                                .iter()
+                                .map(|row| row.exch_ts)
+                                .min()
+                                .expect("snapshot batch should be nonempty"),
+                            px: 0,
+                            qty: 0,
+                            ..first.clone()
+                        }),
+                    );
+                    for row in &depth[start..d] {
+                        output.extend(fuse.process(row.clone()));
+                    }
+                }
             }
-            at_start = false;
         } else {
             output.extend(fuse.process(depth[d].clone()));
             d += 1;
-            at_start = false;
         }
     }
     (output, fuse)
@@ -225,15 +236,84 @@ mod tests {
     #[test]
     fn flushes_snapshot_at_end_of_file() {
         let input = [event(DEPTH_SNAPSHOT_EVENT | BUY_EVENT, 100, 1, 2)];
-        let (result, _) = fuse_events(&input, &[], SnapshotMode::Process, FixedFuse::default());
+        let (result, _) = fuse_events(&input, &[], SnapshotResetMode::Range, FixedFuse::default());
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].ev, DEPTH_CLEAR_EVENT | BUY_EVENT);
         assert_eq!(result[1], input[0]);
-        assert!(
-            fuse_events(&input, &[], SnapshotMode::IgnoreSod, FixedFuse::default())
-                .0
-                .is_empty()
+    }
+
+    #[test]
+    fn full_reset_replaces_both_sides_and_replays_clear_before_snapshot() {
+        let initial = || {
+            let mut fuse = FixedFuse::default();
+            for (side, px) in [
+                (BUY_EVENT, 90),
+                (BUY_EVENT, 100),
+                (SELL_EVENT, 110),
+                (SELL_EVENT, 120),
+            ] {
+                fuse.process(event(DEPTH_EVENT | side, px, 1, 1));
+            }
+            fuse
+        };
+        let snapshot = [
+            event(DEPTH_SNAPSHOT_EVENT | BUY_EVENT, 101, 3, 4),
+            event(DEPTH_SNAPSHOT_EVENT | SELL_EVENT, 109, 2, 5),
+        ];
+        let (full_output, full_book) =
+            fuse_events(&snapshot, &[], SnapshotResetMode::Full, initial());
+        assert_eq!(
+            full_output,
+            [
+                StoredEvent {
+                    ev: DEPTH_CLEAR_EVENT,
+                    exch_ts: 2,
+                    local_ts: 4,
+                    px: 0,
+                    qty: 0,
+                },
+                snapshot[0].clone(),
+                snapshot[1].clone(),
+            ]
         );
+        assert_eq!(
+            full_book.snapshot(10),
+            [
+                event(
+                    DEPTH_SNAPSHOT_EVENT | BUY_EVENT | EXCH_EVENT | LOCAL_EVENT,
+                    101,
+                    10,
+                    10
+                ),
+                event(
+                    DEPTH_SNAPSHOT_EVENT | SELL_EVENT | EXCH_EVENT | LOCAL_EVENT,
+                    109,
+                    10,
+                    10
+                ),
+            ]
+        );
+        let ordered = order_events(full_output, 0).expect("full reset events should order");
+        for flag in [EXCH_EVENT, LOCAL_EVENT] {
+            assert_eq!(
+                ordered
+                    .iter()
+                    .find(|row| row.ev & flag != 0)
+                    .map(|row| row.ev & 0xff),
+                Some(DEPTH_CLEAR_EVENT)
+            );
+        }
+
+        let (range_output, range_book) =
+            fuse_events(&snapshot, &[], SnapshotResetMode::Range, initial());
+        assert_eq!(
+            range_output
+                .iter()
+                .filter(|row| row.ev & 0xff == DEPTH_CLEAR_EVENT)
+                .count(),
+            2
+        );
+        assert_eq!(range_book.snapshot(10).len(), 6);
     }
 
     #[test]

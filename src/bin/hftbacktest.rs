@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use hftbacktest::backtest::data::convert::{ConvertRequest, EodOutput, SnapshotMode, convert_fuse};
+use hftbacktest::backtest::data::convert::{
+    ConvertRequest, EodOutput, SnapshotResetMode, convert_fuse,
+};
 
 #[derive(Parser)]
 #[command(about = "HftBacktest data tools")]
@@ -27,8 +29,8 @@ struct ConvertFuseArgs {
     output_filename: PathBuf,
     #[arg(long)]
     book_ticker_filename: Option<PathBuf>,
-    #[arg(long, value_enum, default_value_t = SnapshotModeArg::Process)]
-    snapshot_mode: SnapshotModeArg,
+    #[arg(long, value_enum, default_value_t = SnapshotResetModeArg::Range)]
+    snapshot_reset_mode: SnapshotResetModeArg,
     #[arg(long, default_value_t = 0)]
     base_latency: i64,
     #[arg(long)]
@@ -40,18 +42,16 @@ struct ConvertFuseArgs {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
-enum SnapshotModeArg {
-    Process,
-    Ignore,
-    IgnoreSod,
+enum SnapshotResetModeArg {
+    Range,
+    Full,
 }
 
-impl From<SnapshotModeArg> for SnapshotMode {
-    fn from(value: SnapshotModeArg) -> Self {
+impl From<SnapshotResetModeArg> for SnapshotResetMode {
+    fn from(value: SnapshotResetModeArg) -> Self {
         match value {
-            SnapshotModeArg::Process => Self::Process,
-            SnapshotModeArg::Ignore => Self::Ignore,
-            SnapshotModeArg::IgnoreSod => Self::IgnoreSod,
+            SnapshotResetModeArg::Range => Self::Range,
+            SnapshotResetModeArg::Full => Self::Full,
         }
     }
 }
@@ -64,7 +64,7 @@ fn main() -> Result<()> {
                 depth: &args.depth_filename,
                 book_ticker: args.book_ticker_filename.as_deref(),
                 output: &args.output_filename,
-                snapshot_mode: args.snapshot_mode.into(),
+                snapshot_reset_mode: args.snapshot_reset_mode.into(),
                 base_latency: args.base_latency,
                 initial_snapshot: args.initial_snapshot_filename.as_deref(),
                 eod_output: args

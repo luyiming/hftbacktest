@@ -44,6 +44,10 @@ cargo run --release -- convert-fuse \
   --output-filename events.npz
 ```
 
+Every depth snapshot is processed and emitted. Snapshots use price-range clears
+by default. Pass `--snapshot-reset-mode full` to clear both book sides before
+applying each snapshot batch.
+
 Run `cargo run --release -- convert-fuse --help` for book ticker, snapshot, and
 latency options.
 
